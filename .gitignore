@@ -47,3 +47,6 @@ artifacts/
 !.env.example
 *.pem
 *.key
+
+# Private D1 local reproduction manifest (default CLI output)
+d1_reproduction_report.json
