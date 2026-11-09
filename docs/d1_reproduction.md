@@ -79,7 +79,7 @@ Synthetic comparator tests run on public GitHub Actions. Private numerical D1 re
 
 ~~~bash
 SPADE_D1_REPRO_ARCHIVE=/private/original.zip \
-  pytest -q tests/regression/test_private_d1_optional.py
+  pytest -q tests/regression/test_d1_numeric_private.py
 ~~~
 
 The generated JSON contains counts, array differences, versions and the input SHA, not raw image or point records.
