@@ -4,7 +4,7 @@
 
 Targetless LiDAR–Camera calibration research code using accumulated sparse LiDAR Geometry, camera metric depth and plane correspondences.
 
-> **Status:** Installable Python package, config-driven D1 legacy readers and **numerically reproduced historical D1 Matching / plane-only 6/8-DoF Calibration**. Research algorithms have **not yet been ported as reusable package modules**.
+> **Status:** Installable Python package, config-driven D1 legacy readers and **numerically reproduced historical D1 Matching / plane-only 6/8-DoF Calibration**. LiDAR D1 A/B/C1 modules are now available, but historical Joint/PGO production and Camera/Calibration solver modules remain unported.
 
 ## Installation
 
@@ -41,6 +41,19 @@ python scripts/reproduce_d1.py \
 Original legacy scripts are executed in a temporary private directory and all Matching, support indices, results CSV, and 4-fold Extrinsic matrices are compared to their saved archival references. This tool **executes included Python source: do not use untrusted archives**.
 
 Local results: **Joint 6 matches / 44 Calibration rows; PGO 5 matches / 40 Calibration rows. All numeric differences 0.0.** The private ZIP is not included in GitHub; public CI uses synthetic comparison tests. See docs/d1_reproduction.md.
+
+
+## D1 LiDAR Refinement (phase 4)
+
+The D1 raw PCD + GLIM A Per-point Deskew, 2026-11-06 B scan-pair 6-DoF Refinement and C1 time-interpolated correction are available as importable modules. Optional target-scan Free-space Filtering is **disabled by default** and is a heuristic, not ground-truth Ghost Point Removal.
+
+~~~bash
+pip install -e '.[research,dev]'
+python scripts/prepare_d1_refinement.py --archive /private/d1_distance.zip --output outputs/d1_lidar --variant A
+# Alternative: --variant B or --variant C1; add --ghost-filter ONLY for ablation
+~~~
+
+A reproduced the stored D1 A PCD with exact coordinate equality (215,504 returns) in the local environment. B pose corrections agree within 0.081 mm translation-component difference to saved experiment reference. **B/C1 are NOT historical Joint/PGO.** Read [LiDAR Refinement](docs/lidar_refinement.md) for reproducibility gates and limitations.
 
 ## Intended Pipeline
 

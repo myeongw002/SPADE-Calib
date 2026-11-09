@@ -1,0 +1,31 @@
+# Historical D1 B/C1 estimator parameters (documentation only).
+# CLI uses the audited exact code defaults; this is not a config parser yet.
+experiment: d1_b_c1_20261106
+reference_scan_id: 5
+raw_scans: 10
+source_range_m: [0.5, 100.0]
+initial_deskew: per_return_glim_slerp
+correction:
+  algorithm: robust_scan_pair_point_to_plane_6dof
+  iterations: 5
+  seed: 20261106
+  sample_voxel_m: 0.14
+  max_points_per_scan: 6000
+  k_nn_normals: 24
+  max_pairs: 22
+  max_matches_per_pair: 750
+  search_radius_m: 0.42
+  cosine_normal_threshold: 0.87
+  point_plane_residual_m: 0.15
+  irls_crossover_m: 0.07
+  train_excluded_wall_roi_m:
+    x: [10.3, 14.9]
+    y: [4.3, 9.4]
+    z: [-1.2, 4.6]
+ghost_filter:
+  enabled_by_default: false
+  mode: target_scan_free_space
+  azimuth_resolution_deg: 0.2
+  elevation_resolution_deg: 2.0
+  margin_m: 0.5
+note: 'Do not treat B/C1 as Joint/PGO; separate historical procedure.'

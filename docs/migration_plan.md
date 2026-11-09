@@ -18,7 +18,12 @@ Read Joint/PGO XYZ, DA2, SfM anchors, camera-plane CSV/NPZ and Hand–Eye CSV/YA
 
 **Gate met locally on 2026-11-09:** Joint matched 6 planes and 44 calibrated Extrinsics; PGO 5 planes and 40 Extrinsics. All reproduced original archive outputs exactly. Each new platform must verify independently.
 
-## Milestone 2 — modular algorithms (next)
+## Milestone 2 — modular algorithms (in progress; phase 4 LiDAR modules)
+
+**Phase 4 completed:** Strict original D1 binary VLP16 scan reader + exact A GLIM per-point Deskew; isolated B scan-level 6DoF and C1 time interpolation modules; optional Target Scan Free-space Filtering; private D1 numeric gates and public synthetic tests. Original historical Joint/PGO Pose Sources are still missing — B/C1 do not reproduce them. Camera extraction/matching/solver modularization remains to be done.
+
+### Remaining modularization steps
+
 
 - Port original ROI-free local-PCA Camera Plane Extraction.
 - Port GLIM Deskew and Accumulation; do not conflate B/C1 and exact Joint/PGO PCD generation.
