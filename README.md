@@ -43,17 +43,25 @@ Original legacy scripts are executed in a temporary private directory and all Ma
 Local results: **Joint 6 matches / 44 Calibration rows; PGO 5 matches / 40 Calibration rows. All numeric differences 0.0.** The private ZIP is not included in GitHub; public CI uses synthetic comparison tests. See docs/d1_reproduction.md.
 
 
-## D1 LiDAR Refinement (phase 4)
+## D1 LiDAR Refinement (phase 4 — selected methods only)
 
-The D1 raw PCD + GLIM A Per-point Deskew, 2026-11-06 B scan-pair 6-DoF Refinement and C1 time-interpolated correction are available as importable modules. Optional target-scan Free-space Filtering is **disabled by default** and is a heuristic, not ground-truth Ghost Point Removal.
+Selected refiners: **Joint 6-DoF** and **Point-to-Plane PGO**. There are no B/C1, interpolated correction, or iterative GICP+PGO variants in the executable pipeline. The common GLIM per-return Deskew and optional target-scan Free-space Filter remain.
+
+**Current capability is historical D1 result replay and per-scan rigid-correction recovery, NOT restoration of the original Joint/PGO optimization algorithms.** Original archived refined XYZ are required until the source optimizers have been recovered or reimplemented and independently checked.
 
 ~~~bash
-pip install -e '.[research,dev]'
-python scripts/prepare_d1_refinement.py --archive /private/d1_distance.zip --output outputs/d1_lidar --variant A
-# Alternative: --variant B or --variant C1; add --ghost-filter ONLY for ablation
+python scripts/prepare_d1_refinement.py \
+  --raw-archive /private/d1_distance.zip \
+  --reference-archive /private/d1_calibration.zip \
+  --method Joint --output outputs/d1_joint
+
+python scripts/prepare_d1_refinement.py \
+  --raw-archive /private/d1_distance.zip \
+  --reference-archive /private/d1_calibration.zip \
+  --method PGO --output outputs/d1_pgo
 ~~~
 
-A reproduced the stored D1 A PCD with exact coordinate equality (215,504 returns) in the local environment. B pose corrections agree within 0.081 mm translation-component difference to saved experiment reference. **B/C1 are NOT historical Joint/PGO.** Read [LiDAR Refinement](docs/lidar_refinement.md) for reproducibility gates and limitations.
+On original D1 (10 scans; 215,504 points), post-hoc per-scan rigid fitting to the archived output has a worst-case residual of about **0.0072 mm**. This does **not** measure optimizer reproducibility. See [LiDAR refinement notes](docs/lidar_refinement.md) for limitations.
 
 ## Intended Pipeline
 

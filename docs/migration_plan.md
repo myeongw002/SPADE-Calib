@@ -18,20 +18,22 @@ Read Joint/PGO XYZ, DA2, SfM anchors, camera-plane CSV/NPZ and Hand–Eye CSV/YA
 
 **Gate met locally on 2026-11-09:** Joint matched 6 planes and 44 calibrated Extrinsics; PGO 5 planes and 40 Extrinsics. All reproduced original archive outputs exactly. Each new platform must verify independently.
 
-## Milestone 2 — modular algorithms (in progress; phase 4 LiDAR modules)
+## Milestone 2 — modular algorithms (in progress)
 
-**Phase 4 completed:** Strict original D1 binary VLP16 scan reader + exact A GLIM per-point Deskew; isolated B scan-level 6DoF and C1 time interpolation modules; optional Target Scan Free-space Filtering; private D1 numeric gates and public synthetic tests. Original historical Joint/PGO Pose Sources are still missing — B/C1 do not reproduce them. Camera extraction/matching/solver modularization remains to be done.
+### Phase 4 — two selected LiDAR refinement candidates
 
-### Remaining modularization steps
+- **Retained only** Joint 6-DoF Scan Pose Optimization and Point-to-Plane PGO.
+- Shared GLIM per-return Deskew, timestamp/scan-ID preservation and optional Target-scan Free-space Filter.
+- Implemented reading of saved historical Joint/PGO D1 XYZ and recovery/verification of 10 scan-wise rigid transforms (maximum pointwise fit error about 7 micrometers). Exact final XYZ are retained.
+- Removed standalone B/C1 estimator, interpolated C1 correction and its tests/configuration from the selected pipeline. Do not confuse the historic B/C1 ablation with final methods.
+- **Open gate:** Obtain or independently implement original Joint/P2Plane-PGO solver; run on D1/D2/D3 raw scans and compare original fixed-reference clouds, corrections and held-out metrics. SVD pose recovery from final XYZ is not solver reproduction.
 
+### Remaining extraction
 
-- Port original ROI-free local-PCA Camera Plane Extraction.
-- Port GLIM Deskew and Accumulation; do not conflate B/C1 and exact Joint/PGO PCD generation.
-- Port Normal Diversity and camera-guided matching with explicit search budgets and seeds.
-- Port historical plane-only 6/8-DoF optimizer without changing its Loss Function.
-- Preserve D1 regression metrics through the refactor and add synthetic geometry tests.
-
-**Gate:** newly ported modules reproduce the same numerical outputs, not merely the legacy scripts.
+- ROI-free Camera Plane Extraction.
+- Normal Diversity and Camera-guided Plane Matching.
+- Plane-only 6/8DoF Calibration Solver.
+- Regression gates for an independently implemented joint/PGO optimizer.
 
 ## Milestone 3 — unified runner
 

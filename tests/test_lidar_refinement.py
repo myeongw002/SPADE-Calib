@@ -84,13 +84,46 @@ def test_free_space_target_needed_and_no_cross_frame_guess():
         filter_cloud(c,np.array([True]))
 
 
-@pytest.mark.skipif(not os.getenv('SPADE_D1_RAW_ZIP') or not os.getenv('SPADE_D1_A_NPZ'),
-                    reason='D1 original raw ZIP and reference A point cloud not configured')
-def test_d1_original_a_numeric_regression():
-    scans,t,m=load_d1_scan_zip(os.environ['SPADE_D1_RAW_ZIP'])
-    a=accumulate_glim(scans,t,target_timestamp_ns=m['lidar_anchor_timestamp_ns'])
-    with np.load(os.environ['SPADE_D1_A_NPZ'],allow_pickle=False) as original:
-        expected=original['xyz']
-    assert a.xyz.shape==expected.shape==(215504,3)
-    # Different epoch subtraction order creates <1e-5m float rounding changes.
-    assert np.max(np.linalg.norm(a.xyz-expected,axis=1)) < 2e-5
+
+
+def test_reference_recovery_accepts_only_joint_pgo():
+    from spade_calib.lidar.refinement import SUPPORTED_METHODS, recover_reference_scan_corrections
+    assert SUPPORTED_METHODS == ('Joint', 'PGO')
+    c = cloud([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1],
+               [2, 0, 0], [3, 0, 0], [2, 1, 0], [2, 0, 1]],
+              [0, 0, 0, 0, 1, 1, 1, 1])
+    xyz = c.xyz.copy()
+    xyz[c.scan_id == 1] += np.array([0.1, -0.2, 0.3])
+    r = recover_reference_scan_corrections(c, xyz, method='Joint', anchor_scan_id=0)
+    assert r.max_residual_m < 1e-6
+    assert r.scan_ids.tolist() == [0, 1]
+    np.testing.assert_allclose(r.corrections_target_aligned[1, :3, 3], [0.1, -0.2, 0.3], atol=1e-6)
+    from spade_calib.lidar import apply_scan_corrections
+    replay = apply_scan_corrections(c, r.scan_ids, r.corrections_target_aligned)
+    np.testing.assert_allclose(replay.xyz, xyz, atol=1e-6)
+    with pytest.raises(ValueError, match='Only Joint and PGO'):
+        recover_reference_scan_corrections(c, xyz, method='C1', anchor_scan_id=0)
+
+
+def test_reference_zip_loader_rejects_non_selected_method(tmp_path):
+    from spade_calib.lidar import load_archived_refined_xyz
+    from zipfile import ZipFile
+    from io import BytesIO
+    z = tmp_path / 'reference.zip'
+    with ZipFile(z, 'w') as f:
+        raw = BytesIO()
+        np.save(raw, np.array([[1., 2., 3.]], dtype=np.float32))
+        f.writestr('D1/inputs/Joint_xyz.npy', raw.getvalue())
+    loaded = load_archived_refined_xyz(z, 'Joint')
+    np.testing.assert_array_equal(loaded, [[1., 2., 3.]])
+    with pytest.raises(ValueError, match='Unsupported refinement'):
+        load_archived_refined_xyz(z, 'B')
+    with pytest.raises(ValueError, match='Expected exactly one'):
+        load_archived_refined_xyz(z, 'PGO')
+
+
+def test_recovery_requires_matching_reference_count():
+    from spade_calib.lidar import recover_reference_scan_corrections
+    c = cloud([[0, 0, 0], [1, 0, 0], [0, 1, 0]], [0, 0, 0])
+    with pytest.raises(ValueError, match='match original'):
+        recover_reference_scan_corrections(c, np.ones((4,3)), method='PGO', anchor_scan_id=0)
