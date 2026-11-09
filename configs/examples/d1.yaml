@@ -1,0 +1,17 @@
+# DESIGN DRAFT ONLY — no parser/CLI yet.
+dataset:
+  name: d1
+  root: /absolute/path/to/private/data
+camera:
+  model: opencv
+  intrinsics_file: /absolute/path/to/private/camera.json
+lidar:
+  cloud_file: /absolute/path/to/private/PGO_xyz.npy
+initialization:
+  transform_file: /absolute/path/to/private/T_handeye_only.txt
+correspondence:
+  strategy: normal_diversity
+  search_budget: 12
+  random_seed: 20261107
+calibration:
+  mode: plane_6d
