@@ -2,61 +2,71 @@
 
 **Sparse Point-cloud Accumulation and Depth-Enhanced LiDAR–Camera Calibration**
 
-SPADE-Calib is an **in-development research framework** for targetless LiDAR–camera extrinsic calibration. The intended pipeline combines sparse LiDAR scan accumulation, camera metric-depth alignment, camera-guided geometric correspondences and extrinsic optimization.
+Research code for targetless LiDAR–camera extrinsic calibration using
+accumulated sparse LiDAR geometry, camera metric-depth and plane
+correspondences.
 
-> **Status — project bootstrap:** only the foundational data models, documentation and tests are implemented. The original D1 experimental scripts have **not** yet been ported or published. Do not interpret the proposed pipeline as a validated end-to-end implementation.
+> **Research status:** project bootstrap and legacy D1 **input adapters** are
+> available. Calibration, SfM reconstruction, plane extraction, matching and
+> LiDAR-refinement algorithms are **not yet ported** as reusable modules.
 
-## Research pipeline (planned)
+## Install
 
-```text
-SfM trajectory + LiDAR trajectory --> Hand–Eye initialization
-LiDAR scans + trajectory ---------> per-point deskew -> refined accumulated cloud
-Camera image + depth + SfM -------> metric depth -> ROI-free camera planes
-Accumulated cloud + camera planes + T_init
-                                --> camera-guided plane correspondences
-Accumulated cloud + metric depth + planes + SfM anchors
-                                --> extrinsic calibration -> evaluation
-```
+Python 3.10+:
 
-Existing D1 experiments implemented plane-based 6/8-DoF optimization. A later, currently unrecovered experiment introduced scene-wide depth consistency in addition to plane and SfM residuals. These are **different experimental generations** and will be migrated separately.
+    python -m venv .venv
+    source .venv/bin/activate
+    pip install -e ".[dev]"
+    pytest -q
 
-## Current contents
+For optional numerical/vision dependencies:
 
-- `src/spade_calib/io/models.py`: validated, in-memory camera, transform, point-cloud and plane representations.
-- `docs/coordinate_systems.md`: frame convention and depth semantics.
-- `docs/data_formats.md`: provisional on-disk interchange format.
-- `docs/architecture.md`: module boundaries and status.
-- `docs/legacy_inventory.md`: 16 recovered legacy Python scripts, grouped by experiment.
-- `docs/migration_plan.md`: staged migration and reproduction gates.
-- `tests/`: synthetic, data-free unit tests.
+    pip install -e ".[research,dev]"
 
-No raw datasets or unpublished experiment ZIP files are committed.
+## Inspect existing D1 inputs
 
-## Development setup
+Unzip the experiment data to a **local path outside this repository**. Copy
+[the example dataset config](configs/examples/d1.yaml), then edit
+dataset.root to the extracted inputs folder. Run:
 
-Python 3.10 or newer:
+    spade-calib inspect --config path/to/local-d1.yaml --output outputs/d1_manifest.json
 
-```bash
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install -e ".[dev]"
-python -m pytest
-```
+This reads legacy Joint/PGO XYZ, DA2 arrays, SfM anchors, camera planes/masks
+and Hand–Eye matrices; checks their basic validity and writes an input
+manifest. It does **not** perform calibration.
 
-Optional research dependencies:
+Run optional private D1 artifact-shape tests with:
 
-```bash
-python -m pip install -e ".[research,dev]"
-```
+    SPADE_D1_CONFIG=/path/to/local-d1.yaml pytest -q
 
-There is **no runnable `spade-calib` CLI yet**. Configuration samples are design drafts rather than executable experiments.
+## Planned architecture
 
-## Reproducibility and claims
+    SfM + GLIM -> Hand–Eye initialization
+    LiDAR + trajectory -> deskew -> pose refinement -> accumulated cloud
+    Camera image + DA2 + SfM -> metric depth -> ROI-free camera planes
+    Camera planes + LiDAR cloud -> normal-diversity guided correspondences
+    Geometry + initial transform -> calibration -> held-out evaluation
 
-A numeric decrease in scene-depth residual is **not** ground-truth extrinsic accuracy. The D1/D2/D3 results in the research history require a documented dataset split, identical evaluation support, and independent extrinsic reference before calibration accuracy can be claimed.
+Older D1 experiments implemented plane-only 6/8-DoF optimization. The later
+scene-wide + plane + SfM optimizer is a **separate, not-yet-recovered version**.
 
-See [migration plan](docs/migration_plan.md) for the next engineering tasks.
+## Documentation
 
-## Publication and licensing
+- [Legacy D1 adapters](docs/legacy_adapters.md)
+- [Coordinate systems](docs/coordinate_systems.md)
+- [Data interchange schema](docs/data_formats.md)
+- [Recovered code inventory](docs/legacy_inventory.md)
+- [Migration plan](docs/migration_plan.md)
 
-Code/data publication rights are being reviewed. **No license has been selected yet**; public visibility does not imply a license to reuse the repository's content.
+## Research limitations
+
+Existing scene-depth consistency results do not establish independent
+ground-truth extrinsic accuracy. Plane matching is not guaranteed to identify
+the same physical surface. The original Hand–Eye transform and LiDAR PCD frame
+must be checked before using them together.
+
+## Data / licensing
+
+No raw recordings, point clouds, SfM reconstructions, original experiment
+ZIPs, or private output are tracked. Publication and licensing rights have not
+yet been decided; **the repository has no software license at present**.

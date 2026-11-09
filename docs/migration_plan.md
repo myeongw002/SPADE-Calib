@@ -1,51 +1,55 @@
 # Migration milestones and acceptance gates
 
-## Milestone 0 — bootstrap (this PR)
+## Milestone 0 — bootstrap (merged PR #1)
 
-- Package skeleton, basic typed/validated geometry models and synthetic tests.
-- Explicit coordinate conventions and provisional interchange schema.
-- Legacy dependency inventory and public-data guardrails.
-- No promise of a runnable calibration pipeline.
+- Installable Python package skeleton with validated camera/transform/cloud/plane models.
+- Synthetic tests, coordinate conventions and original experiment inventory.
 
-**Gate:** `pip install -e ".[dev]"` and `pytest` pass in clean environments.
+## Milestone 1A — legacy D1 input adapters (this PR)
 
-## Milestone 1 — freeze reproducible D1 baseline
+- Read exact Joint/PGO XYZ, SfM anchors, aligned depth, plane CSV/masks and Hand–Eye files.
+- Validate shapes, pixel counts, transforms and coordinate-frame labels.
+- Preserve invalid depth pixels instead of silently repairing them.
+- Support config-relative datasets and read-only input manifest with SHA-256 hashes.
+- Add synthetic tests and an optional original D1 artifact-count regression.
 
-- Keep source ZIPs and raw data **outside** the public repository.
+**Gate:** Python package install, synthetic CI, and opt-in original D1 artifact
+checks all pass. This does not constitute calibration result reproduction.
+
+## Milestone 1B — freeze numerical D1 baseline (next)
+
+- Preserve source ZIPs and private data outside the public repository.
 - Record package/tool versions and archive SHA-256 hashes.
-- Re-execute existing D1 plane-only matching/calibration, capture matrices, match IDs, 4-fold metrics and optimizer status.
-- Confirm consistent initial Hand–Eye transform and coordinate frames.
+- Re-run exact legacy camera-guided / plane-only calibration.
+- Store extrinsic matrices, correspondence IDs, optimizer status and held-out
+  4-fold metrics in private golden references.
+- Confirm initial Hand–Eye transform and PCD coordinate frames.
 
-**Gate:** a script compares reproduced results to saved baselines using documented tolerances.
+**Gate:** deterministic numeric regression for the original D1 pipeline.
 
-## Milestone 2 — adapters, then algorithms
+## Milestone 2 — extract pure algorithm modules
 
-- Implement IO adapters for the exact legacy NPY/NPZ/CSV/YAML formats.
-- Extract pure functions for camera backprojection and plane extraction.
-- Extract LiDAR deskew/refinement functions (do not silently conflate B/C1 and Joint/PGO).
-- Extract Normal Diversity and guided matching with explicit budget/seed.
-- Migrate plane-only 6/8-DoF optimization *unchanged* before revising any residual.
+- Refactor Camera ROI-free plane extraction and supporting geometry.
+- Extract LiDAR deskew/refinement without conflating B/C1 and Joint/PGO.
+- Extract Normal Diversity and guided plane matching with explicit budget/seed.
+- Migrate original plane-only 6/8-DoF solver without changing loss semantics.
+- Add dataset-independent tests with synthetic calibration scenes.
 
-**Gate:** same D1 results for the same input data and seeds.
+**Gate:** regression metrics match the frozen baseline at documented tolerances.
 
 ## Milestone 3 — unified runner
 
-- Configuration-driven stage runner/CLI, deterministic output directories.
-- Input/config hash provenance, caching, validation and standard logs.
-- End-to-end D1 pipeline plus non-data-dependent integration tests.
+- Config-driven, deterministic intermediate artifacts; stage-level CLI.
+- Data and config checksums, caching and reproducible experiment metadata.
+- End-to-end D1 plane-only pipeline (reduced demo where permitted).
 
-## Milestone 4 — research-method restoration (separate from refactor)
+## Milestone 4 — new research method (separate changes)
 
-- Reimplement scene-wide depth residual with visibility/occlusion rules.
-- Compare scene-only 6-DoF, plane-only 6-DoF, scene+plane 6-DoF, scene+SfM 8-DoF, scene+plane+SfM 8-DoF.
-- Reintroduce Normal Diversity with **equal search budgets** and fixed per-plane RANSAC seeds.
-- Restore D2/D3 fixed-common-support evaluation.
-- Study correspondence reliability, plane-position uncertainty and extrinsic/depth coupling.
+- Reimplement scene-wide depth residual with explicit visibility/occlusion.
+- Compare scene-only 6D, plane-only 6D, scene+plane 6D,
+  scene+SfM 8D and scene+plane+SfM 8D.
+- Reinstate Normal Diversity under equal search budgets and fixed RANSAC seeds.
+- Restore D2/D3 common-support transfer evaluation.
+- Study joint observability and physical plane-match reliability.
 
-**Gate:** no performance claim beyond the metrics actually measured; independent extrinsic truth required for accuracy claims.
-
-## Publication safeguards
-
-The GitHub repository is public. Do not upload raw camera imagery, scan archives, SfM reconstructions, positional metadata, credentials, or published/unpublished partner data without checking rights and privacy. Code can also contain personally identifying absolute paths; review before migrating.
-
-Do not select a software license on the user's behalf.
+Do not equate internal depth consistency with true extrinsic accuracy.

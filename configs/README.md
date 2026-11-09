@@ -1,7 +1,17 @@
-# Configurations (planned)
+# Dataset configuration
 
-Configuration-driven pipeline execution has not been implemented. The example below documents the intended fields only. Source-code defaults and algorithm semantics must be audited before a parser is committed.
+The dataset inspection CLI is **implemented**. The complete calibration
+pipeline and calibration-mode configuration are **not implemented** yet.
 
-- `examples/d1.yaml`: a **non-executable** configuration draft with placeholder input paths.
-- Sensor calibration data should be stored separately from experiment policy.
-- Scene IDs, input/output paths, ground hypotheses, model versions and random seeds must not be embedded in library code.
+1. Extract the private D1 experiment archive outside this repository.
+2. Copy examples/d1.yaml to a local config file.
+3. Set dataset.root to the extracted inputs directory.
+4. Verify lidar_reference and camera match the actual physical frames.
+5. Run:
+
+    spade-calib inspect --config path/to/local-d1.yaml --output outputs/d1_manifest.json
+
+Relative dataset.root paths are resolved relative to the YAML file itself.
+Relative paths inside inputs are resolved relative to dataset.root.
+SHA-256 hashes record the exact file bytes; no raw points or images are
+embedded in the JSON manifest.
