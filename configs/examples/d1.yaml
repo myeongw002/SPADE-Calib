@@ -1,17 +1,19 @@
-# DESIGN DRAFT ONLY — no parser/CLI yet.
+# Copy this file and set dataset.root to a LOCAL, EXTRACTED 'inputs' folder.
+# The config is now executable with: spade-calib inspect --config <this-file>
+# Camera frame and LiDAR reference frame must be verified for your recording.
+schema_version: 1
 dataset:
   name: d1
-  root: /absolute/path/to/private/data
-camera:
-  model: opencv
-  intrinsics_file: /absolute/path/to/private/camera.json
-lidar:
-  cloud_file: /absolute/path/to/private/PGO_xyz.npy
-initialization:
-  transform_file: /absolute/path/to/private/T_handeye_only.txt
-correspondence:
-  strategy: normal_diversity
-  search_budget: 12
-  random_seed: 20261107
-calibration:
-  mode: plane_6d
+  root: /absolute/path/to/extracted/COMPA_D1_RefinedPCD_CameraGuided_Calibration_20261107/inputs
+frames:
+  lidar: lidar_reference
+  camera: camera
+inputs:
+  joint_cloud: Joint_xyz.npy
+  pgo_cloud: PGO_xyz.npy
+  handeye: T_handeye_only.txt
+  raw_depth: raw_da2.npy
+  metric_depth: 1791439637016960512_da2_metric_aligned.npy
+  sfm_anchors: 1791439637016960512_sfm_sparse_metric.npz
+  camera_planes: camera_planes.csv
+  camera_masks: camera_masks_320x180.npz
