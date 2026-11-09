@@ -2,71 +2,67 @@
 
 **Sparse Point-cloud Accumulation and Depth-Enhanced LiDAR–Camera Calibration**
 
-Research code for targetless LiDAR–camera extrinsic calibration using
-accumulated sparse LiDAR geometry, camera metric-depth and plane
-correspondences.
+Targetless LiDAR–Camera calibration research code using accumulated sparse LiDAR Geometry, camera metric depth and plane correspondences.
 
-> **Research status:** project bootstrap and legacy D1 **input adapters** are
-> available. Calibration, SfM reconstruction, plane extraction, matching and
-> LiDAR-refinement algorithms are **not yet ported** as reusable modules.
+> **Status:** Installable Python package, config-driven D1 legacy readers and **numerically reproduced historical D1 Matching / plane-only 6/8-DoF Calibration**. Research algorithms have **not yet been ported as reusable package modules**.
 
-## Install
+## Installation
 
-Python 3.10+:
+~~~bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e '.[dev]'
+pytest -q
+~~~
 
-    python -m venv .venv
-    source .venv/bin/activate
-    pip install -e ".[dev]"
-    pytest -q
+For numeric/vision dependencies also install with pip install -e '.[research,dev]'.
 
-For optional numerical/vision dependencies:
+## Inspect D1 inputs
 
-    pip install -e ".[research,dev]"
+Extract private data **outside** the repository. Copy configs/examples/d1.yaml and set dataset.root to the extracted inputs directory.
 
-## Inspect existing D1 inputs
+~~~bash
+spade-calib inspect --config path/to/local-d1.yaml \
+  --output outputs/d1_manifest.json
+~~~
 
-Unzip the experiment data to a **local path outside this repository**. Copy
-[the example dataset config](configs/examples/d1.yaml), then edit
-dataset.root to the extracted inputs folder. Run:
+This inspects point clouds, SfM/DA2, camera plane files and Hand–Eye inputs. It does not estimate Calibration.
 
-    spade-calib inspect --config path/to/local-d1.yaml --output outputs/d1_manifest.json
+## Reproduce original D1 plane-only Calibration
 
-This reads legacy Joint/PGO XYZ, DA2 arrays, SfM anchors, camera planes/masks
-and Hand–Eye matrices; checks their basic validity and writes an input
-manifest. It does **not** perform calibration.
+With an authorized **trusted original** 2026-11-07 experiment ZIP:
 
-Run optional private D1 artifact-shape tests with:
+~~~bash
+python scripts/reproduce_d1.py \
+  --archive /private/COMPA_D1_RefinedPCD_CameraGuided_Calibration_20261107.zip \
+  --output outputs/d1_reproduction_report.json
+~~~
 
-    SPADE_D1_CONFIG=/path/to/local-d1.yaml pytest -q
+Original legacy scripts are executed in a temporary private directory and all Matching, support indices, results CSV, and 4-fold Extrinsic matrices are compared to their saved archival references. This tool **executes included Python source: do not use untrusted archives**.
 
-## Planned architecture
+Local results: **Joint 6 matches / 44 Calibration rows; PGO 5 matches / 40 Calibration rows. All numeric differences 0.0.** The private ZIP is not included in GitHub; public CI uses synthetic comparison tests. See docs/d1_reproduction.md.
 
-    SfM + GLIM -> Hand–Eye initialization
-    LiDAR + trajectory -> deskew -> pose refinement -> accumulated cloud
-    Camera image + DA2 + SfM -> metric depth -> ROI-free camera planes
-    Camera planes + LiDAR cloud -> normal-diversity guided correspondences
-    Geometry + initial transform -> calibration -> held-out evaluation
+## Intended Pipeline
 
-Older D1 experiments implemented plane-only 6/8-DoF optimization. The later
-scene-wide + plane + SfM optimizer is a **separate, not-yet-recovered version**.
+    SfM + GLIM -> Hand–Eye Initialization
+    LiDAR scans -> Deskew -> Pose Refinement -> Accumulated PCD
+    Camera + DA2 + SfM -> Metric Depth -> ROI-free Camera Plane Extraction
+    Camera and LiDAR Geometry -> Normal Diversity + Guided Correspondences
+    Initial Extrinsic + observations -> Calibration -> Evaluation
+
+The archived 2026-11-07 baseline is **plane-only**. The newer scene-wide + plane + SfM Joint Optimizer remains unrecovered.
 
 ## Documentation
 
-- [Legacy D1 adapters](docs/legacy_adapters.md)
-- [Coordinate systems](docs/coordinate_systems.md)
-- [Data interchange schema](docs/data_formats.md)
-- [Recovered code inventory](docs/legacy_inventory.md)
-- [Migration plan](docs/migration_plan.md)
+- docs/d1_reproduction.md — Verified local reproduction and limitations
+- docs/legacy_adapters.md — Implemented D1 input readers
+- docs/coordinate_systems.md — Frames, depth and plane conventions
+- docs/data_formats.md — Provisional data schema
+- docs/legacy_inventory.md — Experiment script inventory
+- docs/migration_plan.md — Future development gates
 
-## Research limitations
+## Limitations and permissions
 
-Existing scene-depth consistency results do not establish independent
-ground-truth extrinsic accuracy. Plane matching is not guaranteed to identify
-the same physical surface. The original Hand–Eye transform and LiDAR PCD frame
-must be checked before using them together.
+Output reproducibility does not prove Extrinsic accuracy or correct physical plane correspondences. Camera masks are not independent of the original SfM depth alignment.
 
-## Data / licensing
-
-No raw recordings, point clouds, SfM reconstructions, original experiment
-ZIPs, or private output are tracked. Publication and licensing rights have not
-yet been decided; **the repository has no software license at present**.
+The raw ZIP, point clouds, imagery and private outputs are not tracked. The repository currently has no software license; public visibility alone is not permission to reuse private source or data.

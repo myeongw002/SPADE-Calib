@@ -1,0 +1,20 @@
+# Historical baseline metadata. NOT an executable optimization configuration.
+# scripts/reproduce_d1.py runs unmodified private original scripts.
+experiment:
+  name: d1_refined_camera_guided_plane_only_20261107
+  phase: baseline_reproduction
+  source_archive: COMPA_D1_RefinedPCD_CameraGuided_Calibration_20261107.zip
+  methods: [Joint, PGO]
+  expected:
+    camera_plane_candidates: 24
+    lidar_points_per_method: 215504
+    joint_accepted_ids: [0, 6, 1, 5, 3, 19]
+    pgo_accepted_ids: [0, 6, 1, 5, 3]
+    joint_calibration_rows: 44
+    pgo_calibration_rows: 40
+    folds: 4
+  comparison:
+    relative_tolerance: 1.0e-6
+    absolute_tolerance: 1.0e-6
+  scope_note: >-
+    Historical experiment settings only. No scene-wide residual is optimized.
