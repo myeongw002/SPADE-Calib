@@ -1,0 +1,32 @@
+experiment: d1_selected_joint_p2plane_pgo_20261106
+source: COMPA_D1_Refinement_Methods_B_Fixed_20261106
+point_cloud:
+  scan_count: 10
+  range_m: [0.5, 100.0]
+  target_scan_id: 5
+  deskew: per_return_glim_slerp
+methods: [Joint, PGO]
+joint:
+  iterations: 5
+  seed: 20261106
+  sampling_voxel_m: 0.14
+  samples_per_scan_max: 6000
+  normals_neighbors: 24
+  pair_distance_m: 0.42
+  normals_abs_cosine_min: 0.87
+  pair_point_to_plane_m: 0.15
+  max_matches_per_pair: 750
+  robust_irls_transition_m: 0.07
+pgo:
+  pairs: joint_initial_pair_correspondence
+  pair_estimation: soft_l1_point_to_plane
+  relative_pose_graph: anchored_linearized_small_angle
+  rounds: 4
+ablation:
+  d1_wall_roi_excluded: true
+  ghost_filter: false
+  ghost_filter_mode: target_scan_free_space
+notes:
+  - 'Original Joint/PGO solver reproduced from experimental scripts; not GLIM internal optimizer.'
+  - 'Historic refined reference PCD is used only after optimization for regression checks.'
+  - 'D1-specific masks and thresholds must be recalibrated/disabled for D2 and D3.'
