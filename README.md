@@ -91,6 +91,19 @@ spade-calib select-scenes --glim /private/traj_lidar.txt \
 
 For complete recordings, a candidate needs continuous raw LiDAR scan timestamp coverage (default >=10 scans, max 1.5s gap including boundaries); RGB/SfM registration and raw PCD paths are indexed. This stage does NOT compute final extrinsic, plane correspondences, or a statistically calibrated 6/8-DoF FIM. Observability metrics depend on normalization and regularization and must be checked against final geometry/calibration. See [trajectory Scene selection](docs/scene_selection.md).
 
+## Full-recording 7-DoF Hand–Eye and uncertainty analysis
+
+`spade-calib handeye` fits a **single** `T_lidar_camera` + SfM metric scale from the entire synchronized GLIM/COLMAP trajectory, then reports full-coupling Jacobian observability, an **assumed-noise model-based** 7×7 joint covariance and its 6×6 marginalized Extrinsic covariance, per-DOF tangent standard deviations and coupled weak directions. Optional temporal block bootstrap estimates **recording subset stability**, not true sensor covariance. It does not run calibration on camera/LiDAR planes or turn the estimated covariance into a Prior automatically.
+
+~~~bash
+pip install -e '.[research,dev]'
+spade-calib handeye --config configs/local-recording.yaml --output outputs/handeye.json --bootstrap-resamples 96
+# Historical trajectory-only data (raw PCD and RGB unavailable):
+spade-calib handeye --glim /private/traj_lidar.txt --sfm /private/camera_poses.csv --output outputs/handeye.json --bootstrap-resamples 96
+~~~
+
+See [Full-recording Hand–Eye and uncertainty analysis](docs/handeye_uncertainty.md).
+
 ## Intended Pipeline
 
     SfM + GLIM -> Hand–Eye Initialization
@@ -107,6 +120,7 @@ The archived 2026-11-07 baseline is **plane-only**. The newer scene-wide + plane
 - docs/lidar_refinement.md — Selected LiDAR refinement solvers, reproduction and limits
 - docs/recording_index.md — Whole-recording dataset metadata and timestamp mapping
 - docs/scene_selection.md — Trajectory observability proxy, selection and failure gates
+- docs/handeye_uncertainty.md — Full-trajectory Hand–Eye, joint covariance and bootstrap assumptions
 - docs/legacy_adapters.md — Implemented D1 input readers
 - docs/coordinate_systems.md — Frames, depth and plane conventions
 - docs/data_formats.md — Provisional data schema
