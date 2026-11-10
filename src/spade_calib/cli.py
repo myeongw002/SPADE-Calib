@@ -1,4 +1,4 @@
-"""SPADE-Calib CLI: legacy D1 inspection and whole-recording indexing."""
+"""SPADE-Calib CLI: legacy inspect, full recording index and scene selection."""
 from __future__ import annotations
 
 import argparse
@@ -9,46 +9,105 @@ from pathlib import Path
 import yaml
 
 from spade_calib.io.dataset import inspect_dataset, load_dataset_config
-from spade_calib.io.recording import load_recording_config, index_recording, write_recording_index
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog='spade-calib')
+    sub = parser.add_subparsers(dest='command', required=True)
+    inspect = sub.add_parser('inspect', help='Validate an extracted legacy dataset')
+    inspect.add_argument('--config', type=Path, required=True)
+    inspect.add_argument('--output', type=Path)
+    inspect.add_argument('--no-hashes', action='store_true')
+    index = sub.add_parser('index', help='Index a full recording without loading all point clouds')
+    index.add_argument('--config', type=Path, required=True)
+    index.add_argument('--output', type=Path, required=True)
+    select = sub.add_parser('select-scenes', help='Trajectory observability and scene selection')
+    source = select.add_mutually_exclusive_group(required=True)
+    source.add_argument('--config', type=Path, help='Full recording index config (schema v2)')
+    source.add_argument('--glim', type=Path, help='GLIM trajectory TXT (trajectory-only archival mode)')
+    select.add_argument('--sfm', type=Path, help='COLMAP images.bin/images.txt/camera_poses.csv, needed with --glim')
+    select.add_argument('--camera-to-lidar-offset-ns', type=int, default=0,
+                        help='Explicit image-clock to GLIM-clock offset, with --glim only')
+    select.add_argument('--output', type=Path, required=True)
+    select.add_argument('--window-s', type=float, default=30.0)
+    select.add_argument('--window-stride-s', type=float, default=15.0)
+    select.add_argument('--pair-baseline-s', type=float, default=2.0)
+    select.add_argument('--pair-stride-s', type=float, default=1.0)
+    select.add_argument('--min-pairs', type=int, default=10)
+    select.add_argument('--min-lidar-scans', type=int, default=10)
+    select.add_argument('--max-lidar-gap-s', type=float, default=1.5)
+    select.add_argument('--regularizer', type=float, default=1e-3)
+    select.add_argument('--max-scenes', type=int, default=4)
+    return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="spade-calib")
-    subcommands = parser.add_subparsers(dest="command", required=True)
-    inspect = subcommands.add_parser("inspect", help="Validate extracted legacy D1 artifacts")
-    inspect.add_argument("--config", type=Path, required=True)
-    inspect.add_argument("--output", type=Path)
-    inspect.add_argument("--no-hashes", action="store_true", help="Skip SHA-256 file hashes")
-    index = subcommands.add_parser("index", help="Index entire RGB/LiDAR/GLIM/SfM recording")
-    index.add_argument("--config", type=Path, required=True,
-                       help="Recording configuration (schema_version: 2)")
-    index.add_argument("--output", type=Path, required=True, help="Output JSON manifest")
+    parser = _parser()
+    args = parser.parse_args(argv)
     try:
-        args = parser.parse_args(argv)
-        if args.command == "index":
-            config = load_recording_config(args.config)
-            recording = index_recording(config)
-            report = write_recording_index(recording, args.output)
+        if args.command == 'inspect':
+            config = load_dataset_config(args.config)
+            report = inspect_dataset(config, include_hashes=not args.no_hashes)
+            rendered = json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True)+'\n'
+            if args.output:
+                args.output.parent.mkdir(parents=True, exist_ok=True)
+                args.output.write_text(rendered, encoding='utf-8')
+            else:
+                sys.stdout.write(rendered)
+        elif args.command == 'index':
+            from spade_calib.io.recording import load_recording_config, index_recording, write_recording_index
+            index = index_recording(load_recording_config(args.config))
+            report = write_recording_index(index, args.output)
             print(json.dumps({
-                "dataset": report["dataset"]["name"],
-                "output": str(args.output),
-                "summary": report["summary"],
-                "warnings": report["warnings"],
+                'dataset': report['dataset']['name'],
+                'output': str(args.output),
+                'summary': report['summary'],
+                'warnings': report['warnings'],
             }, ensure_ascii=False, indent=2))
-            return 0
-        configuration = load_dataset_config(args.config)
-        result = inspect_dataset(configuration, include_hashes=not args.no_hashes)
-        rendered = json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
-        if args.output:
-            args.output.parent.mkdir(parents=True, exist_ok=True)
-            args.output.write_text(rendered, encoding="utf-8")
+        elif args.command == 'select-scenes':
+            from spade_calib.selection import (
+                SelectionSettings, load_trajectory_data, from_recording_index,
+                select_scenes, write_scene_selection,
+            )
+            cfg = SelectionSettings(
+                window_s=args.window_s, window_stride_s=args.window_stride_s,
+                pair_baseline_s=args.pair_baseline_s, pair_stride_s=args.pair_stride_s,
+                min_pairs=args.min_pairs, max_scenes=args.max_scenes,
+                min_lidar_scans_per_window=args.min_lidar_scans,
+                max_lidar_gap_s=args.max_lidar_gap_s,
+                regularizer=args.regularizer,
+            )
+            if args.config is not None:
+                if args.sfm is not None or args.camera_to_lidar_offset_ns != 0:
+                    raise ValueError('With --config, SfM and clock offset must come from recording YAML')
+                from spade_calib.io.recording import load_recording_config, index_recording
+                index = index_recording(load_recording_config(args.config))
+                samples = from_recording_index(index)
+                stamps = [x.timestamp_ns for x in index.lidar_scans]
+            else:
+                if args.sfm is None:
+                    raise ValueError('--sfm is required with --glim')
+                index = None
+                samples = load_trajectory_data(
+                    args.glim, args.sfm,
+                    camera_to_lidar_offset_ns=args.camera_to_lidar_offset_ns,
+                )
+                stamps = None
+            report = select_scenes(samples, cfg, lidar_scan_stamps_ns=stamps)
+            write_scene_selection(report, args.output, index=index)
+            print(json.dumps({
+                'matched_trajectory_poses': report['recording']['matched_camera_glim_poses'],
+                'candidates': len(report['candidates']),
+                'selected': report['selected_count'],
+                'output': str(args.output),
+            }, indent=2))
         else:
-            sys.stdout.write(rendered)
+            parser.error('Unknown command')
     except (OSError, ValueError, KeyError, TypeError, yaml.YAMLError) as exc:
-        print(f"spade-calib: {exc}", file=sys.stderr)
+        print(f'spade-calib: {exc}', file=sys.stderr)
         return 2
     return 0
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     raise SystemExit(main())

@@ -46,6 +46,16 @@ Read Joint/PGO XYZ, DA2, SfM anchors, camera-plane CSV/NPZ and Hand–Eye CSV/YA
 - Lazy raw PCD scan loading with per-return times and provenance; metadata JSON manifest.
 - **Not yet implemented:** observability analysis, scene segmentation/selection, camera calibration parsing, an automatic scene runner, and complete end-to-end Calibration.
 
+## Milestone 2C — Trajectory Observability and Scene Selection (PR #6)
+
+- Synchronize GLIM and COLMAP registered camera trajectories at timestamps, no implicit world-frame or clock-offset alignment.
+- Propose fixed-duration scene windows, compute 3x3 rotation-excitation and 4x4 translation + unknown-SfM-scale Jacobian information proxies.
+- Document the 7x7 matrix as **a motion-excitation surrogate, not the final plane/depth FIM**, and report weak eigen-directions rather than naming independent Euler angles.
+- Select up to K non-overlapping windows using deterministic greedy log-det gain.
+- In whole-recording mode, require raw LiDAR timestamp coverage; trajectory-only mode remains explicitly non-executable without images/scans.
+- Actual archived 2026-10-08 trajectories: 4,747 synchronized poses, 30 candidate windows, 4 selected trajectory windows; the archived 3×10 raw LiDAR PCDs do not fully cover any 30-second selected scene.
+- Still needed: Geometry-based scene validation, refinement on selected windows, end-to-end Hand–Eye and plane/depth Calibration, independent held-out calibration accuracy evaluation.
+
 ## Milestone 3 — unified runner
 
 Config-driven full pipeline, stage outputs, SHA/config caching, logs, artifacts and dataset-independent execution.
