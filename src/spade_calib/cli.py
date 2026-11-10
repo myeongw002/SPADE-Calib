@@ -1,5 +1,4 @@
-"""Small, read-only CLI for inspecting legacy datasets; no calibration yet."""
-
+"""SPADE-Calib CLI: legacy D1 inspection and whole-recording indexing."""
 from __future__ import annotations
 
 import argparse
@@ -10,19 +9,33 @@ from pathlib import Path
 import yaml
 
 from spade_calib.io.dataset import inspect_dataset, load_dataset_config
+from spade_calib.io.recording import load_recording_config, index_recording, write_recording_index
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="spade-calib")
     subcommands = parser.add_subparsers(dest="command", required=True)
-    inspect = subcommands.add_parser("inspect", help="Validate an extracted legacy dataset")
-    inspect.add_argument("--config", type=Path, required=True, help="Dataset YAML path")
-    inspect.add_argument("--output", type=Path, help="Optional JSON manifest destination")
-    inspect.add_argument(
-        "--no-hashes", action="store_true", help="Skip SHA-256 input provenance hashes"
-    )
-    args = parser.parse_args(argv)
+    inspect = subcommands.add_parser("inspect", help="Validate extracted legacy D1 artifacts")
+    inspect.add_argument("--config", type=Path, required=True)
+    inspect.add_argument("--output", type=Path)
+    inspect.add_argument("--no-hashes", action="store_true", help="Skip SHA-256 file hashes")
+    index = subcommands.add_parser("index", help="Index entire RGB/LiDAR/GLIM/SfM recording")
+    index.add_argument("--config", type=Path, required=True,
+                       help="Recording configuration (schema_version: 2)")
+    index.add_argument("--output", type=Path, required=True, help="Output JSON manifest")
     try:
+        args = parser.parse_args(argv)
+        if args.command == "index":
+            config = load_recording_config(args.config)
+            recording = index_recording(config)
+            report = write_recording_index(recording, args.output)
+            print(json.dumps({
+                "dataset": report["dataset"]["name"],
+                "output": str(args.output),
+                "summary": report["summary"],
+                "warnings": report["warnings"],
+            }, ensure_ascii=False, indent=2))
+            return 0
         configuration = load_dataset_config(args.config)
         result = inspect_dataset(configuration, include_hashes=not args.no_hashes)
         rendered = json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True) + "\n"

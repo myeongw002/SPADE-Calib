@@ -24,7 +24,7 @@ Pipeline orchestration belongs in a future CLI/runner, not module import side ef
 
 ## Current state
 
-Only `io/models.py` and synthetic unit tests exist as reusable package code. No end-to-end pipeline or CLI is available. Original experiments are inventoried in [legacy_inventory.md](legacy_inventory.md) but have not been published.
+Reusable legacy data readers, D1 Joint/P2Plane-PGO LiDAR solvers and whole-recording RGB/LiDAR/GLIM/COLMAP indexing are implemented. `spade-calib inspect` validates historical D1 artifacts; `spade-calib index` builds a metadata index across an entire recording. Camera-plane extraction, observability-based scene selection, common runner and end-to-end calibration are **not implemented**. Original experiments are inventoried in [legacy_inventory.md](legacy_inventory.md). See [recording index](recording_index.md) and [LiDAR refinement](lidar_refinement.md).
 
 ## Known research constraints
 
