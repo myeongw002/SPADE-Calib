@@ -38,6 +38,14 @@ Read Joint/PGO XYZ, DA2, SfM anchors, camera-plane CSV/NPZ and Hand–Eye CSV/YA
 - Plane-only 6/8-DoF Calibration Solver.
 
 
+## Milestone 2B — common recording inputs and indexing (PR #5, stacked on PR #4)
+
+- New schema_version 2 loads full recording paths (RGB, raw PCD, GLIM, COLMAP), retaining schema_version 1 legacy D1 inspector.
+- Deterministic timestamps and nearest LiDAR/image mapping with explicit offset and tolerance; no guessed synchronization.
+- Read registered COLMAP camera poses; never assume SfM metric scale or matching world frames.
+- Lazy raw PCD scan loading with per-return times and provenance; metadata JSON manifest.
+- **Not yet implemented:** observability analysis, scene segmentation/selection, camera calibration parsing, an automatic scene runner, and complete end-to-end Calibration.
+
 ## Milestone 3 — unified runner
 
 Config-driven full pipeline, stage outputs, SHA/config caching, logs, artifacts and dataset-independent execution.

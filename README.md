@@ -59,6 +59,18 @@ Local D1 (10 scans, 215,504 returns) maximum same-return deviations against arch
 
 The D1 preset includes a historical ROI exclusion and anchor scan 5. PGO uses a regularized **small-angle relative pose graph**, not a nonlinear Lie-group optimizer. This numerical reproduction does not independently demonstrate physical calibration accuracy. See [LiDAR refinement](docs/lidar_refinement.md) for limitations.
 
+## Whole-recording data loader and indexer (no Scene selection yet)
+
+This new `schema_version: 2` interface indexes **all** RGB images, raw timestamped LiDAR scans, GLIM trajectory and pycolmap/COLMAP registered camera poses from recording paths, before selecting D1/D2/etc. It does **not** run DA2, GLIM, Calibration or scene observability analysis. The existing legacy D1 `spade-calib inspect` (`schema_version: 1`) remains intact.
+
+~~~bash
+cp configs/examples/recording.yaml configs/local-recording.yaml
+# Edit dataset.root and the four source paths in local-recording.yaml.
+spade-calib index --config configs/local-recording.yaml --output outputs/recording_index.json
+~~~
+
+It supports timestamp-nanosecond filenames or explicit CSV timestamp maps, explicit camera-LiDAR clock offset, nearest-scan pairing with tolerance, raw PCD lazy loading, and COLMAP `images.bin`/`images.txt` or `camera_poses.csv`. **SfM scale and camera–LiDAR clock offset are never inferred.** Only metadata is indexed; unregistered images and unmatched frames are reported rather than silently discarded. See [Whole-recording input contract](docs/recording_index.md).
+
 ## Intended Pipeline
 
     SfM + GLIM -> Hand–Eye Initialization

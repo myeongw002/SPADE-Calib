@@ -1,0 +1,22 @@
+# Whole recording; no scene preselection or calibration execution.
+schema_version: 2
+dataset:
+  name: recording_01
+  root: /absolute/path/to/recording
+inputs:
+  images: matched_images
+  lidar_scans: points/velodyne_points
+  glim: traj_lidar.txt                  # GLIM trajectory text file OR directory
+  sfm: colmap/sparse/0                  # COLMAP model directory or camera_poses.csv
+  camera_calibration: camera.yaml      # optional during indexing, required for projection
+  # image_timestamps: image_timestamps.csv     # optional if filename is epoch-ns
+  # lidar_timestamps: lidar_timestamps.csv     # optional if filename is epoch-ns
+matching:
+  camera_to_lidar_offset_ns: 0         # t_lidar = t_camera + offset
+  max_pair_delta_ms: 100
+pcd:
+  time_field: time                     # per-return offset relative to scan timestamp
+  time_unit: s                         # s, ms, us, ns
+  ring_field: ring
+  range_m: [0.5, 100.0]
+recursive: true
