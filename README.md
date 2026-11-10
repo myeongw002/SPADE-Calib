@@ -59,7 +59,7 @@ Local D1 (10 scans, 215,504 returns) maximum same-return deviations against arch
 
 The D1 preset includes a historical ROI exclusion and anchor scan 5. PGO uses a regularized **small-angle relative pose graph**, not a nonlinear Lie-group optimizer. This numerical reproduction does not independently demonstrate physical calibration accuracy. See [LiDAR refinement](docs/lidar_refinement.md) for limitations.
 
-## Whole-recording data loader and indexer (no Scene selection yet)
+## Whole-recording data loader and indexer
 
 This new `schema_version: 2` interface indexes **all** RGB images, raw timestamped LiDAR scans, GLIM trajectory and pycolmap/COLMAP registered camera poses from recording paths, before selecting D1/D2/etc. It does **not** run DA2, GLIM, Calibration or scene observability analysis. The existing legacy D1 `spade-calib inspect` (`schema_version: 1`) remains intact.
 
@@ -70,6 +70,26 @@ spade-calib index --config configs/local-recording.yaml --output outputs/recordi
 ~~~
 
 It supports timestamp-nanosecond filenames or explicit CSV timestamp maps, explicit camera-LiDAR clock offset, nearest-scan pairing with tolerance, raw PCD lazy loading, and COLMAP `images.bin`/`images.txt` or `camera_poses.csv`. **SfM scale and camera–LiDAR clock offset are never inferred.** Only metadata is indexed; unregistered images and unmatched frames are reported rather than silently discarded. See [Whole-recording input contract](docs/recording_index.md).
+
+## Whole-recording Trajectory Observability and Scene Selection (phase 5)
+
+The `spade-calib select-scenes` CLI takes the existing **schema_version 2 full-recording config**, synchronizes registered pycolmap camera poses with GLIM timestamps using the explicit recorded clock offset, proposes fixed-duration candidate scenes, calculates a documented **motion observability proxy** for Hand–Eye plus unknown SfM scale, and greedily selects **non-overlapping** complementary windows. It preserves the `inspect` and `index` commands.
+
+~~~bash
+pip install -e '.[research,dev]'
+spade-calib select-scenes --config configs/local-recording.yaml \
+  --window-s 30 --window-stride-s 15 --pair-baseline-s 2 \
+  --max-scenes 4 --output outputs/selected_scenes.json
+~~~
+
+For legacy trajectories without all original RGB/PCD files, run **trajectory-only** mode. It explicitly marks selected windows as **not validated runnable scenes**:
+
+~~~bash
+spade-calib select-scenes --glim /private/traj_lidar.txt \
+  --sfm /private/camera_poses.csv --output outputs/trajectory_only.json
+~~~
+
+For complete recordings, a candidate needs continuous raw LiDAR scan timestamp coverage (default >=10 scans, max 1.5s gap including boundaries); RGB/SfM registration and raw PCD paths are indexed. This stage does NOT compute final extrinsic, plane correspondences, or a statistically calibrated 6/8-DoF FIM. Observability metrics depend on normalization and regularization and must be checked against final geometry/calibration. See [trajectory Scene selection](docs/scene_selection.md).
 
 ## Intended Pipeline
 
@@ -85,6 +105,8 @@ The archived 2026-11-07 baseline is **plane-only**. The newer scene-wide + plane
 
 - docs/d1_reproduction.md — Verified local reproduction and limitations
 - docs/lidar_refinement.md — Selected LiDAR refinement solvers, reproduction and limits
+- docs/recording_index.md — Whole-recording dataset metadata and timestamp mapping
+- docs/scene_selection.md — Trajectory observability proxy, selection and failure gates
 - docs/legacy_adapters.md — Implemented D1 input readers
 - docs/coordinate_systems.md — Frames, depth and plane conventions
 - docs/data_formats.md — Provisional data schema

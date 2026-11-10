@@ -1,0 +1,21 @@
+# Example: use this existing schema_version: 2 recording config with select-scenes.
+# Selection parameters are CLI flags or Python SelectionSettings, not part of
+# recording data format; this preserves the PR #5 input API.
+schema_version: 2
+dataset:
+  name: recording_01
+  root: /absolute/path/to/complete/recording
+inputs:
+  images: images/
+  lidar_scans: points/velodyne_points/
+  glim: traj_lidar.txt
+  sfm: colmap/sparse/0/
+  camera_calibration: camera.yaml
+matching:
+  camera_to_lidar_offset_ns: 0
+  max_pair_delta_ms: 100
+pcd:
+  time_field: time
+  time_unit: s
+  ring_field: ring
+  range_m: [0.5, 100.0]
