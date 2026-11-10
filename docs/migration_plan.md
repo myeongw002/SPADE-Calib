@@ -8,7 +8,7 @@ Installable Python package, frame and plane models, coordinate conventions, synt
 
 Read Joint/PGO XYZ, DA2, SfM anchors, camera-plane CSV/NPZ and Hand–Eye CSV/YAML via config-driven loaders; inspect file hashes and validity.
 
-## Milestone 1B — numerical reproduction (this PR)
+## Milestone 1B — numerical reproduction (merged PR #3)
 
 - Unpack the **private original** D1 Calibration archive into an isolated workspace.
 - Run unmodified camera-guided Matching and plane-only 6/8-DoF Calibration for Joint and PGO.
@@ -20,20 +20,23 @@ Read Joint/PGO XYZ, DA2, SfM anchors, camera-plane CSV/NPZ and Hand–Eye CSV/YA
 
 ## Milestone 2 — modular algorithms (in progress)
 
-### Phase 4 — two selected LiDAR refinement candidates
+### Phase 4 — two selected LiDAR Refinement solvers (D1 implemented)
 
-- **Retained only** Joint 6-DoF Scan Pose Optimization and Point-to-Plane PGO.
-- Shared GLIM per-return Deskew, timestamp/scan-ID preservation and optional Target-scan Free-space Filter.
-- Implemented reading of saved historical Joint/PGO D1 XYZ and recovery/verification of 10 scan-wise rigid transforms (maximum pointwise fit error about 7 micrometers). Exact final XYZ are retained.
-- Removed standalone B/C1 estimator, interpolated C1 correction and its tests/configuration from the selected pipeline. Do not confuse the historic B/C1 ablation with final methods.
-- **Open gate:** Obtain or independently implement original Joint/P2Plane-PGO solver; run on D1/D2/D3 raw scans and compare original fixed-reference clouds, corrections and held-out metrics. SVD pose recovery from final XYZ is not solver reproduction.
+- **Joint 6-DoF:** robust point-to-plane matching, IRLS, scan-level 6-DoF corrections from `compa_B_C1_experiment.py` (B correction only; C1 is not selected).
+- **P2Plane PGO:** robust pairwise 6-DoF relative correction estimates and anchored small-angle pose graph from `retest_pgo.py`.
+- Both share GLIM per-return deskew, original scan/return IDs, and optional post-refinement target-scan free-space consistency filtering (OFF by default).
+- Actual D1 optimizer execution: 10 scans; 215,504 returns; 22 scan pairs. Maximum same-return difference from archived final XYZ: **Joint 0.7134 mm / PGO 0.5571 mm**.
+- Previous post-hoc Kabsch transform recovery is removed from the operational pipeline. The archive may be read only after optimization to calculate regression statistics.
+- D1 ROI and wall exclusion are historically fixed and documented; PGO uses a linearized small-angle pose graph, not a nonlinear SE(3) graph objective.
+
+**Remaining gates:** independently validate D2/D3 with raw scans; generalize archive/ROI config; quantify point-support and scene transfer. D1 PCD matching does not prove independent calibration accuracy.
 
 ### Remaining extraction
 
 - ROI-free Camera Plane Extraction.
 - Normal Diversity and Camera-guided Plane Matching.
-- Plane-only 6/8DoF Calibration Solver.
-- Regression gates for an independently implemented joint/PGO optimizer.
+- Plane-only 6/8-DoF Calibration Solver.
+
 
 ## Milestone 3 — unified runner
 

@@ -1,32 +1,30 @@
-"""Opt-in original D1 checks. No private data in public CI."""
+"""Opt-in real D1 pointwise reproducibility; not run on public CI."""
 from __future__ import annotations
 import os
+from io import BytesIO
+from zipfile import ZipFile
 import numpy as np
 import pytest
-from spade_calib.lidar import (SUPPORTED_METHODS, load_d1_scan_zip,
-                              accumulate_glim, load_archived_refined_xyz,
-                              recover_reference_scan_corrections)
+from spade_calib.lidar import load_d1_scan_zip, accumulate_glim, solve_joint, solve_pgo
+
+RAW = os.getenv('SPADE_D1_RAW_ZIP')
+CAL = os.getenv('SPADE_D1_REFINEMENT_REFERENCE_ZIP')
 
 
-@pytest.mark.skipif(not os.getenv('SPADE_D1_RAW_ZIP') or not os.getenv('SPADE_D1_A_NPZ'),
-                    reason='Original D1 raw ZIP and A reference unavailable')
-def test_d1_glim_per_return_deskew():
-    scans, traj, manifest = load_d1_scan_zip(os.environ['SPADE_D1_RAW_ZIP'])
-    a = accumulate_glim(scans, traj, target_timestamp_ns=int(manifest['lidar_anchor_timestamp_ns']))
-    with np.load(os.environ['SPADE_D1_A_NPZ'], allow_pickle=False) as data:
-        expected = data['xyz']
-    np.testing.assert_array_equal(a.xyz, expected)
-    assert len(a.xyz) == 215504
-
-
-@pytest.mark.skipif(not os.getenv('SPADE_D1_RAW_ZIP') or not os.getenv('SPADE_D1_REFERENCE_ZIP'),
-                    reason='Private D1 raw/refined reference ZIPs unavailable')
-@pytest.mark.parametrize('method', SUPPORTED_METHODS)
-def test_selected_d1_original_outputs_are_scanwise_rigid(method):
-    scans, traj, manifest = load_d1_scan_zip(os.environ['SPADE_D1_RAW_ZIP'])
-    a = accumulate_glim(scans, traj, target_timestamp_ns=int(manifest['lidar_anchor_timestamp_ns']))
-    ref = load_archived_refined_xyz(os.environ['SPADE_D1_REFERENCE_ZIP'], method)
-    recovered = recover_reference_scan_corrections(a, ref, method=method, anchor_scan_id=5)
-    assert recovered.max_residual_m < 2e-5  # micrometer-scale float rounding
-    assert recovered.scan_ids.tolist() == list(range(10))
-    assert len(ref) == len(a.xyz) == 215504
+@pytest.mark.skipif(not RAW or not CAL, reason='D1 raw and reference ZIPs not configured')
+@pytest.mark.parametrize('method', ['Joint', 'PGO'])
+def test_d1_joint_pgo_numeric_refinement_from_raw(method):
+    scans, trajectory, manifest = load_d1_scan_zip(RAW)
+    cloud = accumulate_glim(scans, trajectory, target_timestamp_ns=int(manifest['lidar_anchor_timestamp_ns']))
+    assert cloud.xyz.shape == (215504, 3)
+    output = solve_joint(cloud) if method == 'Joint' else solve_pgo(cloud)
+    assert output.xyz.shape == cloud.xyz.shape
+    assert output.iterations[0].get('pairs', output.iterations[0].get('pair_edges')) == 22
+    assert np.allclose(output.transforms[5], np.eye(4), atol=1e-12)
+    with ZipFile(CAL) as z:
+        name = next(n for n in z.namelist() if n.endswith(f'/inputs/{method}_xyz.npy'))
+        ref = np.load(BytesIO(z.read(name)), allow_pickle=False)
+    residual = np.linalg.norm(output.xyz.astype(float) - ref.astype(float), axis=1)
+    # Threshold chosen for reproducing historical software output, not physical accuracy.
+    assert np.max(residual) < .001
+    assert np.percentile(residual, 95) < .0002

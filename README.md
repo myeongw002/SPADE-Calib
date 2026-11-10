@@ -4,7 +4,7 @@
 
 Targetless LiDAR–Camera calibration research code using accumulated sparse LiDAR Geometry, camera metric depth and plane correspondences.
 
-> **Status:** Installable Python package, config-driven D1 legacy readers and **numerically reproduced historical D1 Matching / plane-only 6/8-DoF Calibration**. LiDAR D1 A/B/C1 modules are now available, but historical Joint/PGO production and Camera/Calibration solver modules remain unported.
+> **Status:** Installable Python package, config-driven D1 legacy readers and **numerically reproduced historical D1 Matching / plane-only 6/8-DoF Calibration**. Selected D1 Joint 6-DoF / Point-to-Plane PGO solvers are ported and numerically checked; Camera/Calibration solver modules remain unported.
 
 ## Installation
 
@@ -45,23 +45,19 @@ Local results: **Joint 6 matches / 44 Calibration rows; PGO 5 matches / 40 Calib
 
 ## D1 LiDAR Refinement (phase 4 — selected methods only)
 
-Selected refiners: **Joint 6-DoF** and **Point-to-Plane PGO**. There are no B/C1, interpolated correction, or iterative GICP+PGO variants in the executable pipeline. The common GLIM per-return Deskew and optional target-scan Free-space Filter remain.
-
-**Current capability is historical D1 result replay and per-scan rigid-correction recovery, NOT restoration of the original Joint/PGO optimization algorithms.** Original archived refined XYZ are required until the source optimizers have been recovered or reimplemented and independently checked.
+**Joint 6-DoF** and **Point-to-Plane PGO** optimize from raw D1 LiDAR scans and GLIM trajectory without loading a refined reference PCD. The algorithms were ported from the recovered COMPA_D1_Refinement_Methods_B_Fixed_20261106 source, retaining only two selected methods, with a shared GLIM per-return deskew.
 
 ~~~bash
-python scripts/prepare_d1_refinement.py \
-  --raw-archive /private/d1_distance.zip \
-  --reference-archive /private/d1_calibration.zip \
-  --method Joint --output outputs/d1_joint
-
-python scripts/prepare_d1_refinement.py \
-  --raw-archive /private/d1_distance.zip \
-  --reference-archive /private/d1_calibration.zip \
-  --method PGO --output outputs/d1_pgo
+pip install -e '.[research,dev]'
+python scripts/prepare_d1_refinement.py --raw-archive /private/d1_distance.zip --method Joint --output outputs/d1_joint
+python scripts/prepare_d1_refinement.py --raw-archive /private/d1_distance.zip --method PGO --output outputs/d1_pgo
 ~~~
 
-On original D1 (10 scans; 215,504 points), post-hoc per-scan rigid fitting to the archived output has a worst-case residual of about **0.0072 mm**. This does **not** measure optimizer reproducibility. See [LiDAR refinement notes](docs/lidar_refinement.md) for limitations.
+Add `--reference-archive /private/d1_calibration.zip` for numerical regression only: reference point clouds are compared **after** optimization and are never passed into either solver.
+
+Local D1 (10 scans, 215,504 returns) maximum same-return deviations against archived calibration XYZ: **Joint 0.713 mm, PGO 0.557 mm**. Both optimize over 22 scan pairs. Free-space ghost filtering is optional and OFF by default. No C1, sequential, or iterative GICP+PGO method is exposed.
+
+The D1 preset includes a historical ROI exclusion and anchor scan 5. PGO uses a regularized **small-angle relative pose graph**, not a nonlinear Lie-group optimizer. This numerical reproduction does not independently demonstrate physical calibration accuracy. See [LiDAR refinement](docs/lidar_refinement.md) for limitations.
 
 ## Intended Pipeline
 
@@ -76,6 +72,7 @@ The archived 2026-11-07 baseline is **plane-only**. The newer scene-wide + plane
 ## Documentation
 
 - docs/d1_reproduction.md — Verified local reproduction and limitations
+- docs/lidar_refinement.md — Selected LiDAR refinement solvers, reproduction and limits
 - docs/legacy_adapters.md — Implemented D1 input readers
 - docs/coordinate_systems.md — Frames, depth and plane conventions
 - docs/data_formats.md — Provisional data schema
