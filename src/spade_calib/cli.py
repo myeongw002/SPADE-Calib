@@ -1,4 +1,4 @@
-"""SPADE-Calib CLI: legacy inspect, full recording index and scene selection."""
+"""SPADE-Calib CLI: legacy inspect, recording index, scene selection and Hand-Eye."""
 from __future__ import annotations
 
 import argparse
@@ -38,6 +38,25 @@ def _parser() -> argparse.ArgumentParser:
     select.add_argument('--max-lidar-gap-s', type=float, default=1.5)
     select.add_argument('--regularizer', type=float, default=1e-3)
     select.add_argument('--max-scenes', type=int, default=4)
+    handeye = sub.add_parser('handeye', help='Full-trajectory 7-DoF Hand-Eye and uncertainty')
+    source = handeye.add_mutually_exclusive_group(required=True)
+    source.add_argument('--config', type=str, help='Full recording schema-version 2 YAML')
+    source.add_argument('--glim', type=str, help='GLIM trajectory TXT (archived trajectory-only mode)')
+    handeye.add_argument('--sfm', type=str, help='COLMAP images file or pycolmap camera_poses.csv')
+    handeye.add_argument('--camera-to-lidar-offset-ns', type=int, default=0)
+    handeye.add_argument('--output', type=str, required=True)
+    handeye.add_argument('--pair-baseline-s', type=float, default=2.0)
+    handeye.add_argument('--pair-stride-s', type=float, default=1.0)
+    handeye.add_argument('--pair-tolerance-s', type=float, default=0.12)
+    handeye.add_argument('--sigma-relative-rotation-deg', type=float, default=0.5,
+                         help='ASSUMED relative-motion noise, not measured sensor sigma')
+    handeye.add_argument('--sigma-relative-translation-m', type=float, default=0.05,
+                         help='ASSUMED relative-motion noise, not measured sensor sigma')
+    handeye.add_argument('--robust-loss', choices=('linear', 'soft_l1', 'huber', 'cauchy'),
+                         default='soft_l1')
+    handeye.add_argument('--bootstrap-resamples', type=int, default=0)
+    handeye.add_argument('--bootstrap-block-s', type=float, default=20.0)
+    handeye.add_argument('--bootstrap-seed', type=int, default=20261110)
     return parser
 
 
@@ -101,9 +120,12 @@ def main(argv: list[str] | None = None) -> int:
                 'selected': report['selected_count'],
                 'output': str(args.output),
             }, indent=2))
+        elif args.command == 'handeye':
+            from spade_calib.handeye.cli import run_handeye
+            return run_handeye(args)
         else:
             parser.error('Unknown command')
-    except (OSError, ValueError, KeyError, TypeError, yaml.YAMLError) as exc:
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError, yaml.YAMLError) as exc:
         print(f'spade-calib: {exc}', file=sys.stderr)
         return 2
     return 0
