@@ -136,9 +136,8 @@ Camera-frame left-rotation perturbation and additive Camera-frame translation.
 Uncertainty modes and covariance are defined in the same Camera coordinates;
 `T_lidar_camera` is exported only as the inverse for compatibility.
 
-This phase covers trajectory inputs and timestamp matching. KITTI raw `.bin`
-clouds are **not** accepted by the existing PCD refinement loader; they require
-a separate raw-cloud adapter before full point-cloud refinement. See
+This phase covers trajectory inputs and timestamp matching. KITTI raw `.bin` clouds are now supported in rigid scan mode, without
+per-return deskew. See
 [dataset adapter and timestamp contract](docs/dataset_adapters.md).
 
 ## Evaluation-only KITTI 07 Extrinsic comparison
@@ -163,6 +162,38 @@ a full seven-variable Jacobian observability analysis and conditional covariance
 Changing the coordinate chart or Motion Pair selection can change numerical
 results; prior KITTI experiments using different frame intervals are **not**
 expected to reproduce identical estimates.
+
+## KITTI raw Velodyne .bin: non-deskewed point cloud accumulation
+
+KITTI Odometry `.bin` stores little-endian float32 `[x, y, z, reflectance]`.
+It does **not** store per-return timestamps or ring IDs. The new reader
+preserves measured reflectance and original source-return indices; absent
+point-time/ring metadata is `None`, not silently filled with zeros.
+
+The common `RecordingIndex` can lazily read `.bin` files when their scan
+timestamps are provided in a `lidar_timestamps.csv` (or genuine nanosecond
+filenames). For legacy KITTI Odometry 07 GLIM exports with synthetic 0.1s
+timestamps, use the **frame-index** rigid accumulation below; the GLIM rows,
+not those synthetic timestamps, identify scan poses.
+
+~~~bash
+spade-calib accumulate-kitti \
+    --lidar-dir /data/kitti07/velodyne \
+    --glim /data/kitti07/odom_lidar.txt \
+    --kitti-times /data/kitti07/times.txt \
+    --start-frame 100 --stop-frame 110 --target-frame 105 \
+    --output outputs/kitti07_rigid.npz
+~~~
+
+The `.npz` contains target-frame `xyz`, unmodified `intensity` (reflectance),
+`scan_id`, `source_return_index`, selected `frame_ids` and
+`scan_timestamps_ns`. No per-return `time_offset_s` or `ring` arrays are
+fabricated. The `motion_model=rigid` / `deskew_applied=false` metadata
+explicitly records the limitation: within-scan motion distortion remains.
+
+Existing GLIM accumulation with per-point timestamps still supports
+`mode='deskew'`. Attempting that mode with KITTI `.bin` raises a clear error.
+See [KITTI raw scans](docs/dataset_adapters.md#kitti-raw-velodyne-bin-and-rigid-accumulation).
 
 ## Intended Pipeline
 
