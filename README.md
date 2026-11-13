@@ -141,6 +141,29 @@ clouds are **not** accepted by the existing PCD refinement loader; they require
 a separate raw-cloud adapter before full point-cloud refinement. See
 [dataset adapter and timestamp contract](docs/dataset_adapters.md).
 
+## Evaluation-only KITTI 07 Extrinsic comparison
+
+GT is **never passed to Hand–Eye**. Fit using GLIM Odom + COLMAP and one
+global SfM metric scale. Compare the saved `T_camera_lidar` separately:
+
+~~~bash
+spade-calib handeye --glim /data/07/odom_lidar.txt \
+  --sfm /data/07/camera_trajectory_tum.txt \
+  --kitti-times /data/07/times.txt --output outputs/handeye07.json
+
+spade-calib evaluate-kitti-handeye --result outputs/handeye07.json \
+  --calib /data/07/calib.txt --camera-index 2 \
+  --output outputs/handeye07_gt_eval.json
+~~~
+
+The evaluator reports left Camera-axis rotation-vector error
+`Log(R_est R_GT.T)` and Camera-axis translation error `t_est - t_GT`.
+The current Hand–Eye result also contains GT-free rotation-angle consistency,
+a full seven-variable Jacobian observability analysis and conditional covariance.
+Changing the coordinate chart or Motion Pair selection can change numerical
+results; prior KITTI experiments using different frame intervals are **not**
+expected to reproduce identical estimates.
+
 ## Intended Pipeline
 
     SfM + GLIM -> Hand–Eye Initialization
