@@ -11,23 +11,40 @@ from spade_calib.selection.trajectory import load_trajectory_data, match_traject
 
 def run_handeye(args: argparse.Namespace) -> int:
     if args.config is not None:
-        if args.sfm is not None or args.camera_to_lidar_offset_ns != 0:
-            raise ValueError("--sfm and --camera-to-lidar-offset-ns require --glim; --config uses YAML")
+        if (args.sfm is not None or args.camera_to_lidar_offset_ns != 0
+                or args.kitti_times is not None or args.image_timestamps is not None
+                or args.glim_first_frame != 0):
+            raise ValueError("Direct input options require --glim; --config uses YAML")
         from spade_calib.io.recording import index_recording, load_recording_config
         index = index_recording(load_recording_config(args.config))
         # Hand-Eye uses ALL registered image poses, not only those with a nearby PCD scan.
         # Important: avoid throwing away valid trajectory samples when raw scans are sparse.
         poses = [a.sfm for a in index.associations if a.sfm is not None]
+        image_timestamps = {a.sfm.name: int(a.image.timestamp_ns)
+                            for a in index.associations if a.sfm is not None}
         samples = match_trajectories(
             index.glim_trajectory, poses,
             camera_to_lidar_offset_ns=index.config.camera_to_lidar_offset_ns,
+            image_timestamp_map=image_timestamps,
         )
         source = str(index.config.source_config)
     else:
         if args.sfm is None:
             raise ValueError("--sfm is required with --glim")
-        samples = load_trajectory_data(args.glim, args.sfm,
-                                       camera_to_lidar_offset_ns=args.camera_to_lidar_offset_ns)
+        if args.kitti_times is not None:
+            from spade_calib.io.kitti import load_kitti_trajectory_data
+            if args.camera_to_lidar_offset_ns != 0 or args.image_timestamps is not None:
+                raise ValueError("KITTI frame mode is incompatible with clock offsets and timestamp CSV")
+            samples = load_kitti_trajectory_data(
+                args.glim, args.sfm, args.kitti_times,
+                glim_first_frame=args.glim_first_frame,
+            )
+        else:
+            samples = load_trajectory_data(
+                args.glim, args.sfm,
+                camera_to_lidar_offset_ns=args.camera_to_lidar_offset_ns,
+                image_timestamps_csv=args.image_timestamps,
+            )
         source = "GLIM: " + args.glim + "; SfM: " + args.sfm
     settings = HandEyeSettings(
         pair_baseline_s=args.pair_baseline_s,
