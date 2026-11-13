@@ -112,6 +112,12 @@ def load_pcd_scan(
     xyz = np.stack([data[f] for f in ("x", "y", "z")], axis=1).astype(np.float64)
     times = np.asarray(data[time_field], dtype=np.float64) * _TIME_FACTORS[time_unit]
     valid = np.isfinite(xyz).all(axis=1) & np.isfinite(times)
+    intensity = None
+    if "intensity" in fields:
+        intensity = np.asarray(data["intensity"], dtype=np.float64)
+        if intensity.shape != (n,):
+            raise ValueError("PCD intensity must be a scalar field")
+        valid &= np.isfinite(intensity)
     radius = np.linalg.norm(xyz, axis=1)
     valid &= (radius > min_range_m) & (radius < max_range_m)
     chosen = np.flatnonzero(valid)
@@ -127,4 +133,5 @@ def load_pcd_scan(
     return LidarScan(
         scan_id=int(scan_id), timestamp_ns=int(timestamp_ns), xyz=xyz[chosen],
         time_offset_s=times[chosen], ring=rings, source_return_index=chosen.astype(np.int64),
+        intensity=intensity[chosen] if intensity is not None else None,
     )
