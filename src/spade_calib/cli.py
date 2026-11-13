@@ -69,6 +69,14 @@ def _parser() -> argparse.ArgumentParser:
     handeye.add_argument('--bootstrap-resamples', type=int, default=0)
     handeye.add_argument('--bootstrap-block-s', type=float, default=20.0)
     handeye.add_argument('--bootstrap-seed', type=int, default=20261110)
+    evaluation = sub.add_parser('evaluate-kitti-handeye',
+                                help='Evaluate saved T_camera_lidar against KITTI Odometry GT')
+    evaluation.add_argument('--result', type=Path, required=True,
+                            help='JSON output of spade-calib handeye')
+    evaluation.add_argument('--calib', type=Path, required=True,
+                            help='KITTI Odometry sequence calib.txt; evaluation only')
+    evaluation.add_argument('--camera-index', type=int, choices=range(4), default=2)
+    evaluation.add_argument('--output', type=Path)
     return parser
 
 
@@ -149,6 +157,16 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == 'handeye':
             from spade_calib.handeye.cli import run_handeye
             return run_handeye(args)
+        elif args.command == 'evaluate-kitti-handeye':
+            from spade_calib.evaluation.kitti import evaluate_handeye_json
+            report = evaluate_handeye_json(args.result, args.calib,
+                                           camera_index=args.camera_index)
+            rendered = json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + '\\n'
+            if args.output:
+                args.output.parent.mkdir(parents=True, exist_ok=True)
+                args.output.write_text(rendered, encoding='utf-8')
+            else:
+                sys.stdout.write(rendered)
         else:
             parser.error('Unknown command')
     except (OSError, ValueError, KeyError, TypeError, RuntimeError, yaml.YAMLError) as exc:
