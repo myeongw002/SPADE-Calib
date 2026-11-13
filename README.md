@@ -104,6 +104,43 @@ spade-calib handeye --glim /private/traj_lidar.txt --sfm /private/camera_poses.c
 
 See [Full-recording Hand–Eye and uncertainty analysis](docs/handeye_uncertainty.md).
 
+## KITTI vs custom timestamps (shared solver)
+
+Dataset-specific filename/time rules are handled in input adapters. Hand–Eye,
+observability, scene selection and future geometry stages use a shared pose
+representation and **do not branch on dataset names**.
+
+- **Custom recordings:** use nanosecond image/PCD filenames, or declare
+  `image_timestamps.csv` / `lidar_timestamps.csv` in `recording.yaml`.
+  The full-recording Hand–Eye command now respects these explicit mappings.
+- **KITTI Odometry:** keep `000000.png` and `times.txt`. An explicit frame-index
+  adapter matches GLIM *odom rows* and registered COLMAP frames without treating
+  old synthetic 0.1-second GLIM timestamps as actual KITTI times.
+
+~~~bash
+spade-calib handeye --glim /data/kitti07/odom_lidar.txt \\
+  --sfm /data/kitti07/colmap/sparse/0 \\
+  --kitti-times /data/kitti07/times.txt \\
+  --output outputs/kitti07_handeye.json
+
+# Pose-only historical exports are also supported when every frame is present:
+spade-calib handeye --glim /data/kitti07/odom_lidar.txt \\
+  --sfm /data/kitti07/camera_trajectory_tum.txt \\
+  --kitti-times /data/kitti07/times.txt \\
+  --output outputs/kitti07_tum_handeye.json
+~~~
+
+The public, projection-ready Extrinsic is **`T_camera_lidar`**
+(LiDAR → Camera). The current 7-DoF Hand–Eye internal optimization still uses
+its inverse `T_lidar_camera`; both are included in the result JSON. Uncertainty
+coordinates are currently in the LiDAR tangent frame and must be transformed
+before claiming Camera-axis uncertainty.
+
+This phase covers trajectory inputs and timestamp matching. KITTI raw `.bin`
+clouds are **not** accepted by the existing PCD refinement loader; they require
+a separate raw-cloud adapter before full point-cloud refinement. See
+[dataset adapter and timestamp contract](docs/dataset_adapters.md).
+
 ## Intended Pipeline
 
     SfM + GLIM -> Hand–Eye Initialization
