@@ -276,7 +276,7 @@ def load_recording_config(path: str | Path) -> RecordingConfig:
     )
 
 
-def _read_timestamp_csv(path: Path | None) -> dict[str, int] | None:
+def read_timestamp_csv(path: Path | None) -> dict[str, int] | None:
     if path is None:
         return None
     with path.open("r", encoding="utf-8-sig", newline="") as stream:
@@ -296,6 +296,11 @@ def _read_timestamp_csv(path: Path | None) -> dict[str, int] | None:
     if not stamps:
         raise ValueError(f"Empty timestamp CSV: {path}")
     return stamps
+
+
+
+# Backward compatible internal alias for existing recording index paths.
+_read_timestamp_csv = read_timestamp_csv
 
 
 def _validate_timestamp(value: str, context: object) -> int:
