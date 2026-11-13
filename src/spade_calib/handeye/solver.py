@@ -85,17 +85,14 @@ def fit_motion_pairs(pairs: MotionPairs, settings: HandEyeSettings,
     if pairs.count < 7:
         raise ValueError("At least seven relative-motion pairs required")
     if initial_rotation is None or initial_translation_m is None or initial_scale is None:
-        # Legacy closed-form screening initializer solves the inverse extrinsic
-        # (T_lidar_camera). Convert its pose to the canonical T_camera_lidar.
-        ri_lidar_camera, si, diag0 = estimate_rotation_and_sfm_scale(pairs)
-        ri_camera_lidar = ri_lidar_camera.T
+        # Scene screening returns the canonical T_camera_lidar initial guess.
+        ri_camera_lidar, si, diag0 = estimate_rotation_and_sfm_scale(pairs)
         if initial_rotation is None:
             initial_rotation = ri_camera_lidar
         if initial_scale is None:
             initial_scale = si
         if initial_translation_m is None:
-            t_lidar_camera = np.array(diag0["provisional_t_lidar_camera_m"])
-            initial_translation_m = -ri_camera_lidar @ t_lidar_camera
+            initial_translation_m = np.array(diag0["provisional_t_camera_lidar_m"])
     R0 = np.asarray(initial_rotation, dtype=np.float64)
     t0 = np.asarray(initial_translation_m, dtype=np.float64)
     s0 = float(initial_scale)
