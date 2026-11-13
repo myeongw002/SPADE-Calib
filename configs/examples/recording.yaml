@@ -6,7 +6,7 @@ dataset:
 inputs:
   images: matched_images
   lidar_scans: points/velodyne_points
-  glim: traj_lidar.txt                  # GLIM trajectory text file OR directory
+  glim: odom_lidar.txt                  # GLIM Odom text file OR directory
   sfm: colmap/sparse/0                  # COLMAP model directory or camera_poses.csv
   camera_calibration: camera.yaml      # optional during indexing, required for projection
   # image_timestamps: image_timestamps.csv     # optional if filename is epoch-ns
