@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Any, Collection, Sequence
+from typing import Any, Collection, Mapping, Sequence
 import json
 import math
 import re
@@ -112,6 +112,7 @@ def match_trajectories(
     *,
     camera_to_lidar_offset_ns: int = 0,
     allowed_image_names: Collection[str] | None = None,
+    image_timestamp_map: Mapping[str, int] | None = None,
 ) -> MatchedTrajectories:
     """Align GLIM positions to registered camera timestamps; do NOT align world frames.
 
@@ -126,9 +127,29 @@ def match_trajectories(
         registered = [p for p in registered if p.name in permitted or Path(p.name).name in permitted]
     if not registered:
         raise ValueError('No registered camera poses within allowed images')
+    # Explicit metadata takes precedence over filename parsing. This permits
+    # frame-named (KITTI) and arbitrary custom recording images.
+    supplied = ({str(k).replace('\\', '/').removeprefix('./'): v
+                 for k, v in image_timestamp_map.items()}
+                if image_timestamp_map is not None else None)
+    basename_counts: dict[str, int] = {}
+    for pose in registered:
+        basename = Path(pose.name).name
+        basename_counts[basename] = basename_counts.get(basename, 0) + 1
     timestamp_map: dict[int, RegisteredImage] = {}
     for pose in registered:
-        timestamp = _timestamp_from_name(pose.name)
+        if supplied is None:
+            timestamp = _timestamp_from_name(pose.name)
+        else:
+            name = pose.name.replace('\\', '/').removeprefix('./')
+            if name in supplied:
+                timestamp = supplied[name]
+            elif basename_counts[Path(name).name] == 1 and Path(name).name in supplied:
+                timestamp = supplied[Path(name).name]
+            else:
+                raise ValueError(f'Missing or ambiguous SfM image timestamp: {pose.name}')
+            if type(timestamp) is not int or not (0 <= timestamp <= _MAX_NS):
+                raise ValueError(f'Invalid nanosecond timestamp for {pose.name}')
         if timestamp in timestamp_map:
             raise ValueError('Duplicate SfM image timestamp')
         timestamp_map[timestamp] = pose
@@ -169,7 +190,8 @@ def match_trajectories(
 
 
 def load_trajectory_data(glim_path: str | Path, sfm_path: str | Path,
-                         *, camera_to_lidar_offset_ns: int = 0) -> MatchedTrajectories:
+                         *, camera_to_lidar_offset_ns: int = 0,
+                         image_timestamps_csv: str | Path | None = None) -> MatchedTrajectories:
     """Trajectory-only fallback for archived data without full raw RGB/PCD.
 
     For full recordings, prefer match_trajectories with image-name allowlist
@@ -178,8 +200,11 @@ def load_trajectory_data(glim_path: str | Path, sfm_path: str | Path,
     raw = np.loadtxt(glim_path, dtype=np.float64, ndmin=2)
     glim = GlimTrajectory.from_array(raw)
     poses = load_registered_images(sfm_path)
+    from spade_calib.io.recording import read_timestamp_csv
+    explicit = read_timestamp_csv(Path(image_timestamps_csv)) if image_timestamps_csv else None
     return match_trajectories(
         glim, tuple(poses.values()), camera_to_lidar_offset_ns=camera_to_lidar_offset_ns,
+        image_timestamp_map=explicit,
     )
 
 
@@ -191,8 +216,12 @@ def from_recording_index(index: Any) -> MatchedTrajectories:
              and a.glim_covered]
     if not allowed:
         raise ValueError('No camera frames have SfM pose and associated raw LiDAR')
+    sfm_timestamps = {a.sfm.name: int(a.image.timestamp_ns)
+                      for a in index.associations if a.lidar is not None and a.sfm is not None
+                      and a.glim_covered}
     return match_trajectories(index.glim_trajectory, poses,
-                              camera_to_lidar_offset_ns=index.config.camera_to_lidar_offset_ns)
+                              camera_to_lidar_offset_ns=index.config.camera_to_lidar_offset_ns,
+                              image_timestamp_map=sfm_timestamps)
 
 
 def _nearest(sorted_stamps: NDArray[np.int64], target_ns: int) -> int:
