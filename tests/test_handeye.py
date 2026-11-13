@@ -110,6 +110,9 @@ def test_bootstrap_deterministic_and_serializable(tmp_path):
     loaded=json.loads(path.read_text())
     assert loaded['observability_and_model_covariance']['covariance_available']
     assert loaded['bootstrap']['available']
+    assert loaded['motion_consistency']['pairs'] == fit.pairs.count
+    assert loaded['motion_consistency']['rotation_angle_difference_median_deg'] >= 0
+    assert loaded['motion_consistency']['rotation_angle_difference_p95_deg'] >= 0
     assert loaded['handeye']['T_camera_lidar'][3]==[0,0,0,1]
 
 
