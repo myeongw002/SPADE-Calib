@@ -77,6 +77,18 @@ def _parser() -> argparse.ArgumentParser:
                             help='KITTI Odometry sequence calib.txt; evaluation only')
     evaluation.add_argument('--camera-index', type=int, choices=range(4), default=2)
     evaluation.add_argument('--output', type=Path)
+    kitti = sub.add_parser('accumulate-kitti',
+                           help='Rigid accumulation of KITTI .bin scans using indexed GLIM Odom poses')
+    kitti.add_argument('--lidar-dir', type=Path, required=True)
+    kitti.add_argument('--glim', type=Path, required=True)
+    kitti.add_argument('--kitti-times', type=Path, required=True)
+    kitti.add_argument('--start-frame', type=int, required=True)
+    kitti.add_argument('--stop-frame', type=int, required=True)
+    kitti.add_argument('--target-frame', type=int, required=True)
+    kitti.add_argument('--glim-first-frame', type=int, default=0)
+    kitti.add_argument('--min-range-m', type=float, default=0.5)
+    kitti.add_argument('--max-range-m', type=float, default=100.0)
+    kitti.add_argument('--output', type=Path, required=True, help='Result .npz path')
     return parser
 
 
@@ -157,6 +169,64 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == 'handeye':
             from spade_calib.handeye.cli import run_handeye
             return run_handeye(args)
+        elif args.command == 'accumulate-kitti':
+            import os
+            import tempfile
+            import numpy as np
+            from spade_calib.io.kitti import accumulate_kitti_rigid_window, read_kitti_times_ns
+            if args.start_frame < 0 or args.stop_frame < args.start_frame:
+                raise ValueError('start-frame must be >=0 and stop-frame must be >=start-frame')
+            if args.output.suffix.lower() != '.npz':
+                raise ValueError('KITTI rigid accumulation output must end with .npz')
+            frame_ids = list(range(args.start_frame, args.stop_frame + 1))
+            cloud = accumulate_kitti_rigid_window(
+                args.lidar_dir, args.glim, args.kitti_times, frame_ids,
+                target_frame_id=args.target_frame,
+                glim_first_frame=args.glim_first_frame,
+                min_range_m=args.min_range_m, max_range_m=args.max_range_m,
+            )
+            stamps = read_kitti_times_ns(args.kitti_times)[frame_ids]
+            dest = args.output.expanduser().resolve()
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            temp_file = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode='wb', dir=dest.parent, suffix='.npz',
+                    prefix='.kitti_', delete=False,
+                ) as handle:
+                    temp_file = Path(handle.name)
+                    np.savez_compressed(
+                        handle,
+                        xyz=cloud.xyz, intensity=cloud.intensity,
+                        scan_id=cloud.scan_id,
+                        source_return_index=cloud.source_return_index,
+                        frame_ids=np.asarray(frame_ids, dtype=np.int64),
+                        scan_timestamps_ns=stamps,
+                        reference_timestamp_ns=np.int64(cloud.reference_timestamp_ns),
+                        frame_id=np.str_(cloud.frame_id),
+                        motion_model=np.str_('rigid'),
+                        deskew_applied=np.bool_(False),
+                    )
+                os.replace(temp_file, dest)
+            finally:
+                if temp_file is not None:
+                    temp_file.unlink(missing_ok=True)
+            report = {
+                'output': str(dest),
+                'point_count': len(cloud.xyz),
+                'frame_id': cloud.frame_id,
+                'source_frames': len(frame_ids),
+                'motion_model': 'rigid',
+                'deskew_applied': False,
+                'per_return_timestamps_available': False,
+                'ring_available': False,
+                'reflectance_available': True,
+                'scan_timestamp_source': 'KITTI times.txt',
+                'pose_mapping': 'GLIM row index, not GLIM timestamp',
+                'source_return_index_preserved': True,
+                'warning': 'Within-scan motion distortion remains uncorrected',
+            }
+            sys.stdout.write(json.dumps(report, indent=2, ensure_ascii=False) + '\n')
         elif args.command == 'evaluate-kitti-handeye':
             from spade_calib.evaluation.kitti import evaluate_handeye_json
             report = evaluate_handeye_json(args.result, args.calib,

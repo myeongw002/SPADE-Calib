@@ -22,17 +22,40 @@ class LidarScan:
     scan_id: int
     timestamp_ns: int
     xyz: NDArray[np.float64]
-    time_offset_s: NDArray[np.float64]
-    ring: NDArray[np.uint16]
+    # None means that per-return timing/ring metadata is absent, NOT zero.
+    time_offset_s: NDArray[np.float64] | None
+    ring: NDArray[np.uint16] | None
     source_return_index: NDArray[np.int64]
+    # Optional measured reflectance; left untouched (no invented normalization).
+    intensity: NDArray[np.float64] | None = None
 
     def __post_init__(self):
+        if type(self.scan_id) is not int or not (0 <= self.scan_id < 65536):
+            raise ValueError('scan_id must fit the accumulated uint16 ID')
+        if type(self.timestamp_ns) is not int or self.timestamp_ns < 0:
+            raise ValueError('timestamp_ns must be a nonnegative integer')
         n = len(self.xyz)
-        if self.xyz.shape != (n, 3) or any(np.asarray(a).shape != (n,) for a in
-            (self.time_offset_s, self.ring, self.source_return_index)):
+        required = (self.source_return_index,)
+        optional = (self.time_offset_s, self.ring, self.intensity)
+        if self.xyz.shape != (n, 3) or any(np.asarray(a).shape != (n,) for a in required):
             raise ValueError('LiDAR scan has incompatible array shapes')
-        if not np.isfinite(self.xyz).all() or not np.isfinite(self.time_offset_s).all():
-            raise ValueError('LiDAR scan contains non-finite coordinates/times')
+        if any(np.asarray(a).shape != (n,) for a in optional if a is not None):
+            raise ValueError('LiDAR scan metadata has incompatible array shapes')
+        if not np.isfinite(self.xyz).all() or any(
+            not np.isfinite(a).all() for a in (self.time_offset_s, self.intensity)
+            if a is not None
+        ):
+            raise ValueError('LiDAR scan contains non-finite coordinates/times/intensity')
+        if np.any(self.source_return_index < 0) or len(np.unique(self.source_return_index)) != n:
+            raise ValueError('Invalid or duplicate source return indices')
+
+    @property
+    def has_per_return_time(self) -> bool:
+        return self.time_offset_s is not None
+
+    @property
+    def has_ring(self) -> bool:
+        return self.ring is not None
 
 
 def _decode_binary_pcd(raw: bytes, *, scan_id: int, timestamp_ns: int,
@@ -65,7 +88,8 @@ def _decode_binary_pcd(raw: bytes, *, scan_id: int, timestamp_ns: int,
     chosen = np.flatnonzero(good)[(r > min_range_m) & (r < max_range_m)]
     return LidarScan(scan_id, timestamp_ns, xyz[chosen],
                      cloud['time'][chosen].astype(np.float64), cloud['ring'][chosen].copy(),
-                     chosen.astype(np.int64))
+                     chosen.astype(np.int64),
+                     intensity=cloud['intensity'][chosen].astype(np.float64))
 
 
 def load_d1_scan_zip(path: str | Path, *, min_range_m: float = 0.5,

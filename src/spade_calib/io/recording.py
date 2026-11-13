@@ -1,6 +1,6 @@
 """Whole-recording dataset loader and deterministic timestamp/trajectory index.
 
-The index is metadata-only: images and PCD point arrays are read lazily.
+The index is metadata-only: images and PCD/KITTI .bin points are read lazily.
 No scene segmentation, calibration, or automatic time-offset estimation occurs.
 """
 from __future__ import annotations
@@ -19,11 +19,12 @@ import yaml
 
 from spade_calib.io.colmap import RegisteredImage, load_registered_images, resolve_colmap_images
 from spade_calib.io.pcd import load_pcd_scan
+from spade_calib.io.kitti_bin import load_kitti_bin_scan
 from spade_calib.lidar.scan_io import LidarScan
 from spade_calib.lidar.trajectory import GlimTrajectory
 
 _IMAGE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"})
-_LIDAR_EXTENSIONS = frozenset({".pcd"})
+_LIDAR_EXTENSIONS = frozenset({".pcd", ".bin"})
 _NS_MIN_DIGITS = 17  # reject short integer frame numbers as nanosecond timestamps
 _NS_MAX_DIGITS = 20
 _INT64_MAX = (1 << 63) - 1
@@ -77,8 +78,24 @@ class RecordingIndex:
     glim_trajectory: GlimTrajectory
     sfm_source: Path
 
+    def _read_lidar(self, record: TimedFile, *, scan_id: int) -> LidarScan:
+        """Select reader by file type; never fabricate .bin time/ring fields."""
+        if record.path.suffix.lower() == '.bin':
+            return load_kitti_bin_scan(
+                record.path, scan_id=scan_id, timestamp_ns=record.timestamp_ns,
+                min_range_m=self.config.min_range_m, max_range_m=self.config.max_range_m,
+            )
+        if record.path.suffix.lower() == '.pcd':
+            return load_pcd_scan(
+                record.path, scan_id=scan_id, timestamp_ns=record.timestamp_ns,
+                time_field=self.config.lidar_time_field, time_unit=self.config.lidar_time_unit,
+                ring_field=self.config.lidar_ring_field,
+                min_range_m=self.config.min_range_m, max_range_m=self.config.max_range_m,
+            )
+        raise ValueError(f'Unsupported LiDAR scan extension: {record.path.suffix}')
+
     def load_lidar_scan(self, scan: int | TimedFile) -> LidarScan:
-        """Lazily load a PCD into the existing LiDAR refinement scan model."""
+        """Lazily load PCD or KITTI .bin with explicit scan timestamp."""
         if isinstance(scan, int):
             record = self.lidar_scans[scan]
             scan_id = scan
@@ -88,12 +105,7 @@ class RecordingIndex:
             except ValueError as exc:
                 raise ValueError("Scan record does not belong to this index") from exc
             record = scan
-        return load_pcd_scan(
-            record.path, scan_id=scan_id, timestamp_ns=record.timestamp_ns,
-            time_field=self.config.lidar_time_field, time_unit=self.config.lidar_time_unit,
-            ring_field=self.config.lidar_ring_field,
-            min_range_m=self.config.min_range_m, max_range_m=self.config.max_range_m,
-        )
+        return self._read_lidar(record, scan_id=scan_id)
 
     def lidar_window(self, start_ns: int, stop_ns: int) -> tuple[TimedFile, ...]:
         """Return chronological scans in inclusive timestamp bounds, without choosing a scene."""
@@ -117,12 +129,10 @@ class RecordingIndex:
         for record in records:
             if source.get(record.path) != record:
                 raise ValueError("Selected record not present in this recording")
-        return tuple(load_pcd_scan(
-            record.path, scan_id=i, timestamp_ns=record.timestamp_ns,
-            time_field=self.config.lidar_time_field, time_unit=self.config.lidar_time_unit,
-            ring_field=self.config.lidar_ring_field,
-            min_range_m=self.config.min_range_m, max_range_m=self.config.max_range_m,
-        ) for i, record in enumerate(records))
+        if len(records) > 65536:
+            raise ValueError('Accumulation scan IDs must fit uint16')
+        return tuple(self._read_lidar(record, scan_id=i)
+                     for i, record in enumerate(records))
 
     def to_dict(self) -> dict[str, Any]:
         def file_row(record: TimedFile) -> dict[str, Any]:
@@ -155,6 +165,8 @@ class RecordingIndex:
                 "camera_lidar_matched_images": matched,
                 "unpaired_images": len(self.images) - matched,
                 "lidar_scans_within_glim_range": glim_scans,
+                "kitti_bin_scans_without_per_return_time": sum(
+                    r.path.suffix.lower() == '.bin' for r in self.lidar_scans),
                 "glim_pose_count": len(self.glim_trajectory.timestamps),
                 "glim_range_ns_approx": [
                     int(round(float(self.glim_trajectory.timestamps[0]) * 1e9)),
@@ -183,6 +195,10 @@ class RecordingIndex:
             data["warnings"].append("Some scan timestamps fall outside GLIM trajectory coverage")
         if matched < len(self.images):
             data["warnings"].append("Some camera frames have no LiDAR frame within the configured tolerance")
+        if any(s.path.suffix.lower() == ".bin" for s in self.lidar_scans):
+            data["warnings"].append(
+                "KITTI .bin contains no per-return time/ring; use rigid scan accumulation, "
+                "never per-return deskew. Explicit scan timestamps must match the GLIM clock.")
         if not self.config.camera_calibration:
             data["warnings"].append("Camera intrinsics/distortion not configured; future projection requires calibration")
         return data

@@ -76,6 +76,7 @@ def test_full_dataset_index_is_sorted_and_lazy(tmp_path):
     assert cloud.scan_id==1
     np.testing.assert_array_equal(cloud.source_return_index,[0,1])
     np.testing.assert_allclose(cloud.time_offset_s,[0.001,0.002],atol=1e-8)
+    np.testing.assert_allclose(cloud.intensity,[3.,4.],atol=1e-8)
     assert len(recording.lidar_window(BASE-1,BASE+1))==1
     selected=recording.load_window_scans(recording.lidar_window(BASE-1,BASE+100_000_001))
     assert [x.scan_id for x in selected]==[0,1]
