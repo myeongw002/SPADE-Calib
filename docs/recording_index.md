@@ -5,7 +5,7 @@ This is a **pre-scene-selection** index, not a scene-specific Calibration datase
 ## Required source inputs
 
 - `images`: directory of RGB files with **nanosecond timestamp stems** (17–20 decimal digits) or an explicit timestamp CSV.
-- `lidar_scans`: directory of raw `.pcd` files with the same timestamp policy.
+- `lidar_scans`: directory of raw `.pcd` or KITTI Odometry `.bin` files with the same timestamp policy. Index-named KITTI files require an explicit timestamp CSV for this generic recording path.
 - `glim`: `traj_lidar.txt`/`glim_trajectory.txt` trajectory file or directory with exactly one recognized trajectory file. Lines: `timestamp_seconds x y z qx qy qz qw`; frame convention: `T_world_lidar`.
 - `sfm`: directory containing **one** COLMAP/pycolmap sparse reconstruction (registered `images.bin` / `images.txt`), or a `camera_poses.csv` exported with columns `image_id,image_name,camera_id,qw,qx,qy,qz,tx,ty,tz`. Pose convention: `T_camera_sfm_world`; translation is **not assumed metric**.
 - `camera_calibration` optional for indexing, required later for projection.
@@ -32,9 +32,18 @@ frames/frame_02.jpg,1791439637116960512
 
 Image files are associated with their nearest LiDAR frame using `t_lidar = t_camera + camera_to_lidar_offset_ns`, only within `max_pair_delta_ms`. Ties resolve to the earlier scan. LiDAR records can be reused by multiple images; no one-to-one pairing is implied. The camera–LiDAR clock offset **is never estimated**. Missing associations and SfM poses are reported; no synthetic timestamps or poses are generated. The same basename in multiple directories is permitted only when SfM names match exact relative paths. `glim_covered` tests only the **frame timestamp** bounds; it does not prove per-return deskew coverage.
 
-### Lazy LiDAR PCD reader
+### Lazy LiDAR PCD and KITTI .bin readers
 
-`RecordingIndex.load_lidar_scan(i)` reads one PCD and returns existing `spade_calib.lidar.scan_io.LidarScan`, keeping original filtered return indices. Supports uncompressed `DATA binary` and `DATA ascii` with standard numeric scalar x/y/z/time fields and optional ring. The `time_field` is **scan-relative** and can be converted from `s/ms/us/ns`; PCDs with absolute per-return timestamps, `binary_compressed`, LAS/LAZ, ROS bag topics or vendor-specific layouts require a dedicated adapter. Missing ring is marked as `uint16=65535`, not ring 0. Missing per-return time **raises**, rather than pretending all returns were captured at the scan timestamp.
+`RecordingIndex.load_lidar_scan(i)` reads one PCD and returns existing `spade_calib.lidar.scan_io.LidarScan`, keeping original filtered return indices. Supports uncompressed `DATA binary` and `DATA ascii` with standard numeric scalar x/y/z/time fields and optional ring. The `time_field` is **scan-relative** and can be converted from `s/ms/us/ns`; PCDs with absolute per-return timestamps, `binary_compressed`, LAS/LAZ, ROS bag topics or vendor-specific layouts require a dedicated adapter. Missing ring is marked as `uint16=65535`, not ring 0. Missing per-return time in a **PCD** raises, rather than pretending
+all returns were captured at the scan timestamp. The separate KITTI `.bin`
+reader supports measured XYZ/reflectance and sets missing per-return time and
+ring explicitly to `None`. The `LidarScan` and `AccumulatedCloud` models
+retain optional reflectance; no automatic intensity normalization occurs.
+A KITTI scan can be accumulated with `mode='rigid'` (scan-level pose only).
+Attempting `mode='deskew'` when any scan has missing per-point time raises
+explicitly. For indexed KITTI with synthetic GLIM pose timestamps, use
+`spade-calib accumulate-kitti` instead of timestamp interpolation; see
+[dataset adapters](dataset_adapters.md#kitti-raw-velodyne-bin-and-rigid-accumulation).
 
 ### Interface boundary
 
