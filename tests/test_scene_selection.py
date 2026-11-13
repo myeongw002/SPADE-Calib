@@ -52,7 +52,7 @@ def test_handeye_convention_and_metric_scale():
     R,s,details=estimate_rotation_and_sfm_scale(p)
     assert details['rotation_residual_median_deg']<.01
     assert abs(s-8)<.05
-    np.testing.assert_allclose(R,Rotation.from_euler('xyz',[.05,.08,-.12]).as_matrix(),atol=.003)
+    np.testing.assert_allclose(R,Rotation.from_euler('xyz',[.05,.08,-.12]).as_matrix().T,atol=.003)
 
 
 def test_yaw_only_has_unobservable_rotation_axis():
