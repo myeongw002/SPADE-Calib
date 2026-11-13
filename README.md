@@ -93,7 +93,7 @@ For complete recordings, a candidate needs continuous raw LiDAR scan timestamp c
 
 ## Full-recording 7-DoF Hand–Eye and uncertainty analysis
 
-`spade-calib handeye` fits a **single** `T_lidar_camera` + SfM metric scale from the entire synchronized GLIM/COLMAP trajectory, then reports full-coupling Jacobian observability, an **assumed-noise model-based** 7×7 joint covariance and its 6×6 marginalized Extrinsic covariance, per-DOF tangent standard deviations and coupled weak directions. Optional temporal block bootstrap estimates **recording subset stability**, not true sensor covariance. It does not run calibration on camera/LiDAR planes or turn the estimated covariance into a Prior automatically.
+`spade-calib handeye` fits a **single** `T_camera_lidar` + SfM metric scale from the entire synchronized GLIM/COLMAP trajectory, then reports full-coupling Jacobian observability, an **assumed-noise model-based** 7×7 joint covariance and its 6×6 marginalized Extrinsic covariance, per-DOF tangent standard deviations and coupled weak directions. Optional temporal block bootstrap estimates **recording subset stability**, not true sensor covariance. It does not run calibration on camera/LiDAR planes or turn the estimated covariance into a Prior automatically.
 
 ~~~bash
 pip install -e '.[research,dev]'
@@ -131,15 +131,38 @@ spade-calib handeye --glim /data/kitti07/odom_lidar.txt \\
 ~~~
 
 The public, projection-ready Extrinsic is **`T_camera_lidar`**
-(LiDAR → Camera). The current 7-DoF Hand–Eye internal optimization still uses
-its inverse `T_lidar_camera`; both are included in the result JSON. Uncertainty
-coordinates are currently in the LiDAR tangent frame and must be transformed
-before claiming Camera-axis uncertainty.
+(LiDAR → Camera). The 7-DoF Hand–Eye solver directly optimizes `T_camera_lidar` using a
+Camera-frame left-rotation perturbation and additive Camera-frame translation.
+Uncertainty modes and covariance are defined in the same Camera coordinates;
+`T_lidar_camera` is exported only as the inverse for compatibility.
 
 This phase covers trajectory inputs and timestamp matching. KITTI raw `.bin`
 clouds are **not** accepted by the existing PCD refinement loader; they require
 a separate raw-cloud adapter before full point-cloud refinement. See
 [dataset adapter and timestamp contract](docs/dataset_adapters.md).
+
+## Evaluation-only KITTI 07 Extrinsic comparison
+
+GT is **never passed to Hand–Eye**. Fit using GLIM Odom + COLMAP and one
+global SfM metric scale. Compare the saved `T_camera_lidar` separately:
+
+~~~bash
+spade-calib handeye --glim /data/07/odom_lidar.txt \
+  --sfm /data/07/camera_trajectory_tum.txt \
+  --kitti-times /data/07/times.txt --output outputs/handeye07.json
+
+spade-calib evaluate-kitti-handeye --result outputs/handeye07.json \
+  --calib /data/07/calib.txt --camera-index 2 \
+  --output outputs/handeye07_gt_eval.json
+~~~
+
+The evaluator reports left Camera-axis rotation-vector error
+`Log(R_est R_GT.T)` and Camera-axis translation error `t_est - t_GT`.
+The current Hand–Eye result also contains GT-free rotation-angle consistency,
+a full seven-variable Jacobian observability analysis and conditional covariance.
+Changing the coordinate chart or Motion Pair selection can change numerical
+results; prior KITTI experiments using different frame intervals are **not**
+expected to reproduce identical estimates.
 
 ## Intended Pipeline
 

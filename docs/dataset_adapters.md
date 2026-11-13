@@ -9,9 +9,10 @@ pose/point-cloud interfaces. They must not branch on dataset names.
 - SfM pose: `T_sfm_world_camera` (camera-to-its-SfM-world), **unknown metric scale**.
 - Public extrinsic: **`T_camera_lidar`**, transforming a LiDAR point into camera
   coordinates: `p_camera = R_camera_lidar @ p_lidar + t_camera_lidar`.
-- Current Hand–Eye solver internally optimizes `T_lidar_camera` and also exports
-  `T_camera_lidar`. Do not confuse its LiDAR-frame uncertainty coordinates with
-  camera-frame observability; the latter requires a covariance coordinate change.
+- Hand–Eye directly optimizes `T_camera_lidar` with a Camera-frame left-rotation
+  perturbation and Camera-frame additive translation. Its Jacobian, weak modes
+  and covariance use the same Camera coordinate chart. The inverse
+  `T_lidar_camera` is also exported for compatibility.
 - SfM and GLIM world frames are independent. Do not apply one world transform
   directly to the other.
 

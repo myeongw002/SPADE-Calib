@@ -26,22 +26,22 @@ spade-calib handeye \
 
 The complete recording mode uses all **registered image poses** backed by available RGB images, even if no raw PCD is near that camera timestamp; ignoring unmatched LiDAR frames would erroneously throw away usable GLIM camera trajectory pairs.
 
-The result includes **both** `T_lidar_camera` and its inverse `T_camera_lidar`. For projection into the RGB camera, use `T_camera_lidar`. The output assumes the provided GLIM and COLMAP conventions from `docs/scene_selection.md`.
+The result includes **both** `T_camera_lidar` and its inverse `T_lidar_camera`. For projection into the RGB camera, use `T_camera_lidar`. The output assumes the provided GLIM and COLMAP conventions from `docs/scene_selection.md`.
 
 ## Mathematical definition
 
-Let `A_i = inv(T_world_lidar(t_i)) @ T_world_lidar(t_j)` and `B_i = inv(T_sfm_world_camera(t_i)) @ T_sfm_world_camera(t_j)`, where SfM translations are not metric. The unknowns are `X = T_lidar_camera` and positive `s` (metric metres per SfM unit):
+Let `A_i = inv(T_world_lidar(t_i)) @ T_world_lidar(t_j)` and `B_i = inv(T_sfm_world_camera(t_i)) @ T_sfm_world_camera(t_j)`, where SfM translations are not metric. The unknowns are `X = T_camera_lidar` and positive `s` (metric metres per SfM unit):
 
-`A_i X = X B_i(s)`.
+`B_i(s) X = X A_i`.
 
 The rotation residual in **radians** and translation residual in **metres** are
 
 ```
-r_R_i = Log[ (R_A_i R_X)^T (R_X R_B_i) ]
-r_t_i = (R_A_i - I) t_X + t_A_i - R_X (s t_B_i)
+r_R_i = Log[ (R_B_i R_X)^T (R_X R_A_i) ]
+r_t_i = (R_B_i - I) t_X + s t_B_i - R_X t_A_i
 ```
 
-Rotation is updated via local *left* perturbation `R_X(delta) = Exp(delta_phi) R_X0`, translation via `t_X = t_X0 + delta_t`, and scale via `s = s0 exp(delta_log_s)`. `scipy.optimize.least_squares` minimizes a robust loss over the whitened 6-component residuals. The rotation and translation whitening sigmas (defaults 0.5 deg and 0.05m for each relative-motion residual) are **assumptions**, not measured GLIM or COLMAP pose noise; changing them changes the reported model-based covariance. The initial `R_X,s,t_X` come from PR #6's closed-form provisional fit.
+Rotation is updated via local *left* perturbation `R_X(delta) = Exp(delta_phi) R_X0`, translation via `t_X = t_X0 + delta_t`, and scale via `s = s0 exp(delta_log_s)`. `scipy.optimize.least_squares` minimizes a robust loss over the whitened 6-component residuals. The rotation and translation whitening sigmas (defaults 0.5 deg and 0.05m for each relative-motion residual) are **assumptions**, not measured GLIM or COLMAP pose noise; changing them changes the reported model-based covariance. The initial `R_X,s,t_X` come from the inverse of PR #6's closed-form provisional fit.
 
 ## Joint Jacobian / weak directions
 
@@ -75,15 +75,23 @@ This quantifies variation with respect to the observed trajectory segments, not 
 - **No scene-wise or geometry-based information matrices computed** by this module; no final Plane/Depth Calibration and no Prior inserted into the final optimizer yet.
 - Actual prediction accuracy requires independent calibrated Extrinsic reference or held-out geometric measurement. Comparison of two trajectory-fit transforms is only a stability check.
 
-## Local historical recording validation (not in public repository)
+## Historical validation and changed conventions
 
-With user-supplied GLIM `traj_lidar(2).txt` and pycolmap `camera_poses(2).csv`, 4,747 camera/GLIM poses synchronized, 477 relative-motion pairs fitted at a 2-s baseline and 1-s pair stride, with positive SfM metric scale 9.22244. Model-based Jacobian numerical rank 7/7 under specified scaling/threshold; its weakest **Extrinsic uncertainty direction** is primarily LiDAR Z Translation (after scale marginalization), as is the bootstrap result. Rotation fit median residual ~0.453deg. A full 20-s, 96-draw temporal block bootstrap gave 24 temporal blocks and substantial uncertainty in LiDAR Z Translation.
+Older archived experiments in this repository were generated with the inverse
+`T_lidar_camera` parameterization and report LiDAR-frame uncertainty directions.
+**Do not directly compare their component-wise uncertainties to the new
+Camera-frame tangent coordinates.** Previously published numerical values
+must be transformed consistently or recomputed from the original trajectories.
 
-A separate **first-half / second-half split** yields substantially different LiDAR Z Translation estimates even though the Jacobian is numerically full rank: full ≈ 0.0185m, first ≈ 0.2557m, second ≈ -0.1471m. This illustrates that rank alone is insufficient for confidence. See private local report for complete values. No private source data is committed.
+The current solver directly optimizes `X = T_camera_lidar`. Its rotation
+perturbation `Exp(delta_phi_C) R_X`, additive translation `delta_t_C`,
+observability modes and conditional covariance are expressed in Camera axes.
+The legacy closed-form initializer is first inverted. The output still
+contains `T_lidar_camera = inverse(T_camera_lidar)` for compatibility.
 
 ## Safety/engineering notes
 
 - If GLIM/SfM timestamps are not synchronized, the model can yield plausible but wrong Extrinsic. Clock offset is never estimated here.
 - If the sensor attachment changes during recording, a common Extrinsic model is invalid.
-- The rotation tangent and translation components are expressed in the LiDAR frame of `T_lidar_camera`; do not interpret them as independent Euler angle uncertainties or transform them to Camera frame without covariance transport.
+- The rotation tangent and translation components are expressed in the Camera frame of `T_camera_lidar`; do not interpret them as independent Euler angle uncertainties or transform them to Camera frame without covariance transport.
 - Scene geometry, camera depth and LiDAR reflectance are not used; there is no assurance that weak DOFs are recoverable from the selected scenes.

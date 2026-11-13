@@ -16,14 +16,15 @@ from spade_calib.selection.trajectory import MotionPairs
 from .residuals import tangent_residuals
 from .solver import HandEyeResult, fit_motion_pairs
 
-_AXES = ("rot_x", "rot_y", "rot_z", "trans_x", "trans_y", "trans_z", "log_sfm_scale")
+# Left rotation tangent and additive translation are expressed in Camera axes.
+_AXES = ("camera_rot_x", "camera_rot_y", "camera_rot_z", "camera_trans_x", "camera_trans_y", "camera_trans_z", "log_sfm_scale")
 
 
 def _frame_noise_jacobian(result: HandEyeResult) -> NDArray[np.float64]:
     settings = result.settings
     def fn(x: NDArray[np.float64]) -> NDArray[np.float64]:
-        return tangent_residuals(x, result.pairs, result.rotation_lidar_camera,
-                                 result.translation_lidar_camera_m, result.sfm_scale_to_metric,
+        return tangent_residuals(x, result.pairs, result.rotation_camera_lidar,
+                                 result.translation_camera_lidar_m, result.sfm_scale_to_metric,
                                  math.radians(settings.sigma_relative_rotation_deg),
                                  settings.sigma_relative_translation_m)
     # Centered difference in physical coordinates. 0.5*step is held in both signs,
@@ -55,8 +56,8 @@ def _std_details(covariance: NDArray[np.float64]) -> dict[str, Any]:
     cor = np.divide(covariance, diagonal, out=np.zeros_like(covariance), where=diagonal > 0)
     return {
         "standard_deviations": {
-            "rotation_lidar_axis_deg": np.rad2deg(d[:3]).tolist(),
-            "translation_lidar_axis_m": d[3:6].tolist(),
+            "rotation_camera_axis_deg": np.rad2deg(d[:3]).tolist(),
+            "translation_camera_axis_m": d[3:6].tolist(),
             "log_sfm_scale": float(d[6]) if len(d) > 6 else None,
         },
         "correlation_matrix": cor.tolist(),
@@ -168,16 +169,16 @@ def block_bootstrap_uncertainty(result: HandEyeResult, *, n_resamples: int = 64,
         sample = _slice_pairs(p, idx)
         try:
             fit = fit_motion_pairs(sample, result.settings,
-                                   initial_rotation=result.rotation_lidar_camera,
-                                   initial_translation_m=result.translation_lidar_camera_m,
+                                   initial_rotation=result.rotation_camera_lidar,
+                                   initial_translation_m=result.translation_camera_lidar_m,
                                    initial_scale=result.sfm_scale_to_metric)
             # Reject underexcited resamples rather than treating a solver's
             # arbitrary gauge choice as a valid covariance realization.
             if not analyze_local_uncertainty(fit)["full_rank"]:
                 failed += 1
                 continue
-            dr = Rotation.from_matrix(fit.rotation_lidar_camera @ result.rotation_lidar_camera.T).as_rotvec()
-            params.append(np.r_[dr, fit.translation_lidar_camera_m - result.translation_lidar_camera_m,
+            dr = Rotation.from_matrix(fit.rotation_camera_lidar @ result.rotation_camera_lidar.T).as_rotvec()
+            params.append(np.r_[dr, fit.translation_camera_lidar_m - result.translation_camera_lidar_m,
                                 math.log(fit.sfm_scale_to_metric / result.sfm_scale_to_metric)])
         except (RuntimeError, ValueError, OverflowError, np.linalg.LinAlgError):
             failed += 1

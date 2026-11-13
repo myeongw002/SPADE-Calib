@@ -271,10 +271,10 @@ def build_motion_pairs(samples: MatchedTrajectories, start_ns: int, stop_ns: int
 
 
 def estimate_rotation_and_sfm_scale(pairs: MotionPairs) -> tuple[NDArray[np.float64], float, dict]:
-    """Provisional Hand-Eye rotation/scale *for diagnostics*, not calibration.
+    """Provisional T_camera_lidar Rotation/Scale for diagnostics, not calibration.
 
-    Rotation vectors satisfy rotvec(Ra) ≈ R_X @ rotvec(Rb) for A X = X B.
-    Translation constraint uses SfM scale s: (Ra-I)tX - R_X*(s*tb) = -ta.
+    The closed-form fit first estimates inverse T_lidar_camera then inverts it.
+    Translation uses one global metric SfM scale.
     """
     if pairs.count < 3:
         raise ValueError('Need >=3 motion pairs for initial rotation/scale')
@@ -282,37 +282,39 @@ def estimate_rotation_and_sfm_scale(pairs: MotionPairs) -> tuple[NDArray[np.floa
     b=Rotation.from_matrix(pairs.Rb).as_rotvec()
     u,sv,vh=np.linalg.svd(a.T@b)
     diag=np.diag([1.,1.,np.sign(np.linalg.det(u@vh))])
-    R_X=u@diag@vh
+    R_LC=u@diag@vh
     # estimate tX and scale jointly; rank is explicitly reported
     G=np.column_stack([(pairs.Ra-np.eye(3)).reshape(-1,3),
-                       -np.einsum('ij,nj->ni',R_X,pairs.tb).reshape(-1)])
+                       -np.einsum('ij,nj->ni',R_LC,pairs.tb).reshape(-1)])
     sol,res,rank,singular=np.linalg.lstsq(G,-pairs.ta.reshape(-1),rcond=None)
     s=float(sol[-1])
-    error=Rotation.from_matrix(pairs.Ra@R_X@np.swapaxes(pairs.Rb,1,2)@R_X.T).magnitude()
+    error=Rotation.from_matrix(pairs.Ra@R_LC@np.swapaxes(pairs.Rb,1,2)@R_LC.T).magnitude()
+    R_CL = R_LC.T
+    t_CL = -R_CL @ sol[:3]
     report={'rotation_alignment_singular_values':sv.tolist(),
             'rotation_residual_median_deg':float(np.rad2deg(np.median(error))),
             'rotation_residual_p95_deg':float(np.rad2deg(np.percentile(error,95))),
             'translation_scale_system_rank':int(rank),
             'provisional_sfm_scale_to_m':s,
             'scale_is_positive':bool(s>0),
-            'provisional_t_lidar_camera_m':sol[:3].tolist()}
+            'provisional_t_camera_lidar_m':t_CL.tolist()}
     if not np.isfinite(s) or s <= 0:
         raise ValueError('Estimated SfM scale is nonpositive; verify pose conventions and time alignment')
-    return R_X,s,report
+    return R_CL,s,report
 
 
 def _information(pairs: MotionPairs, R_X: NDArray[np.float64], s: float,
                  settings: SelectionSettings) -> NDArray[np.float64]:
     """Normalized block-diagonal motion information *proxy* for selection.
 
-    Rotation block: (I-Ra), translation / log-scale block:
-    [(Ra-I)*L_param, -R_X*(s*tb)]. No actual noise-covariance weighting.
+    Camera-coordinate Rotation block: (Rb-I); Camera Translation / log-scale:
+    [(Rb-I)*L_param, s*tb]. Cross-block couplings omitted; no noise calibration.
     """
     if pairs.count < 1:
         return np.zeros((7,7),dtype=np.float64)
-    J= pairs.Ra-np.eye(3)
+    J= pairs.Rb-np.eye(3)
     Hrot=np.einsum('nij,nik->jk',J,J)/pairs.count
-    scale_col=-np.einsum('ij,nj->ni',R_X,pairs.tb)*s
+    scale_col=pairs.tb*s
     G=np.concatenate((J*settings.translation_parameter_unit_m,
                       scale_col[:,:,None]),axis=2)
     Htrans=np.einsum('nij,nik->jk',G,G)/pairs.count
@@ -329,10 +331,10 @@ def _information_report(info: NDArray, settings: SelectionSettings) -> dict[str,
     trans_exc=np.sqrt(np.maximum(trans_v,0))
     return {
         'rotation_excitation_deg':rot_exc.tolist(),
-        'rotation_weak_axis_lidar_xyz':rot_vec[:,0].tolist(),
+        'rotation_weak_axis_camera_xyz':rot_vec[:,0].tolist(),
         'rotation_weak_under_threshold':bool(rot_exc[0]<settings.min_rotation_excitation_deg),
         'translation_logscale_singular_values':trans_exc.tolist(),
-        'translation_scale_weak_direction_txyz_and_logscale':trans_vec[:,0].tolist(),
+        'translation_scale_weak_direction_camera_txyz_and_logscale':trans_vec[:,0].tolist(),
         'translation_scale_weak_under_threshold':bool(trans_exc[0]<settings.min_translation_scale_sv),
         'information_rank_at_1e-8':int(np.count_nonzero(np.linalg.eigvalsh(info)>1e-8)),
     }

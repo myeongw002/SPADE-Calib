@@ -42,9 +42,10 @@ files exist for selected windows. Each selected row sets
   `camera_to_lidar_offset_ns` is added to it to query GLIM, and **not estimated**.
 - Relative motions are `A = inverse(T_world_lidar(t_i)) @ T_world_lidar(t_j)`
   and `B = inverse(T_sfm_world_camera(t_i)) @ T_sfm_world_camera(t_j)`.
-- The provisional transform obeys `A X = X B(s)` with `X=T_lidar_camera`.
-  A global rotation is fitted from relative rotation vectors, and a provisional
-  positive metric scale `s` from least-squares translation constraints. The
+- The provisional transform obeys `B(s) X = X A` with `X=T_camera_lidar`.
+  A global rotation is fitted from relative rotation vectors in the inverse
+  convention, then converted to `T_camera_lidar`. A positive metric scale `s`
+  is fitted from translation constraints. The
   fit is **diagnostic only**, not a validated extrinsic.
 
 ## Observability proxy: what it means and what it does NOT mean
@@ -53,16 +54,16 @@ For each relative-motion pair, let `Ra`, `ta` denote LiDAR relative motion and
 `Rb`, `tb` denote camera/SfM relative motion. With provisional rotation `R_X`
 and common metric scale `s`, the linear translation-and-log-scale constraint is
 
-`(Ra - I) * t_X - R_X * (s * tb) + ta = 0`.
+`(Rb - I) * t_X + s * tb - R_X * ta = 0`.
 
-The **rotation-excitation block** uses `(Ra-I)` and the **translation/scale
-block** uses `[(Ra-I)*L, -R_X*(s*tb)]`, where `L=1m` by default makes the
+The **Camera-axis rotation-excitation block** uses `(Rb-I)` and the **Camera
+translation/scale block** uses `[(Rb-I)*L, s*tb]`, where `L=1m` by default makes the
 translation perturbation dimensionless. The reported 7x7 block-diagonal
 information `H=(J^T J)/num_pairs` is a **motion-diversity surrogate**. It is
 **not a statistically calibrated Fisher Information Matrix** of the final
 plane/depth residual, has no sensor noise weights, omits rotational-to-
 translation cross-blocks, and depends on the choice of `L` and log-scale
-parameterization. DOF weakness is reported as 3D/4D eigenvectors and normalized
+parameterization. DOF weakness is reported as Camera-coordinate 3D/4D eigenvectors and normalized
 singular values, not as a claim that an individual Euler axis is unobservable.
 
 Candidate scenes are fixed physical-time windows with a configurable stride,

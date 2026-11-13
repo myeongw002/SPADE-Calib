@@ -65,8 +65,8 @@ def test_kitti_adapter_matches_by_frame_despite_independent_pose_time(tmp_path):
     assert np.linalg.norm(matched.lidar_t_world_m[first]) > 0
     fit = fit_full_trajectory(matched)
     assert fit.diagnostics["converged"]
-    assert Rotation.from_matrix(fit.rotation_lidar_camera @ R.T).magnitude() < 1e-5
-    np.testing.assert_allclose(fit.translation_lidar_camera_m, t, atol=1e-4)
+    assert Rotation.from_matrix(fit.rotation_camera_lidar @ R).magnitude() < 1e-5
+    np.testing.assert_allclose(fit.translation_camera_lidar_m, -R.T @ t, atol=1e-4)
     assert fit.sfm_scale_to_metric == pytest.approx(scale, rel=1e-5)
 
 
