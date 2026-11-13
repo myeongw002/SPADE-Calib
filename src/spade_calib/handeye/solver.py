@@ -1,4 +1,4 @@
-"""Whole-trajectory 7-DoF Hand-Eye fitting with SfM scale as a nuisance variable."""
+"""7-DoF Hand-Eye in the LiDAR-to-Camera extrinsic convention."""
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
@@ -50,8 +50,8 @@ class HandEyeSettings:
 
 @dataclass(frozen=True)
 class HandEyeResult:
-    rotation_lidar_camera: NDArray[np.float64]
-    translation_lidar_camera_m: NDArray[np.float64]
+    rotation_camera_lidar: NDArray[np.float64]
+    translation_camera_lidar_m: NDArray[np.float64]
     sfm_scale_to_metric: float
     pairs: MotionPairs
     settings: HandEyeSettings
@@ -59,16 +59,16 @@ class HandEyeResult:
 
     def to_dict(self) -> dict[str, Any]:
         extrinsic = np.eye(4, dtype=np.float64)
-        extrinsic[:3, :3] = self.rotation_lidar_camera
-        extrinsic[:3, 3] = self.translation_lidar_camera_m
+        extrinsic[:3, :3] = self.rotation_camera_lidar
+        extrinsic[:3, 3] = self.translation_camera_lidar_m
         inverse = np.eye(4, dtype=np.float64)
-        inverse[:3, :3] = self.rotation_lidar_camera.T
-        inverse[:3, 3] = -self.rotation_lidar_camera.T @ self.translation_lidar_camera_m
+        inverse[:3, :3] = self.rotation_camera_lidar.T
+        inverse[:3, 3] = -self.rotation_camera_lidar.T @ self.translation_camera_lidar_m
         return {
-            "convention": "T_lidar_camera (multiply camera point to lidar frame)",
+            "convention": "T_camera_lidar (multiply lidar point to camera frame)",
             "translation_units": "m", "sfm_scale_units": "metric_m_per_sfm_unit",
-            "T_lidar_camera": extrinsic.tolist(),
-            "T_camera_lidar": inverse.tolist(),
+            "T_camera_lidar": extrinsic.tolist(),
+            "T_lidar_camera": inverse.tolist(),
             "sfm_scale_to_metric": self.sfm_scale_to_metric,
             "number_of_motion_pairs": self.pairs.count,
             "settings": asdict(self.settings),
@@ -85,13 +85,17 @@ def fit_motion_pairs(pairs: MotionPairs, settings: HandEyeSettings,
     if pairs.count < 7:
         raise ValueError("At least seven relative-motion pairs required")
     if initial_rotation is None or initial_translation_m is None or initial_scale is None:
-        ri, si, diag0 = estimate_rotation_and_sfm_scale(pairs)
+        # Legacy closed-form screening initializer solves the inverse extrinsic
+        # (T_lidar_camera). Convert its pose to the canonical T_camera_lidar.
+        ri_lidar_camera, si, diag0 = estimate_rotation_and_sfm_scale(pairs)
+        ri_camera_lidar = ri_lidar_camera.T
         if initial_rotation is None:
-            initial_rotation = ri
+            initial_rotation = ri_camera_lidar
         if initial_scale is None:
             initial_scale = si
         if initial_translation_m is None:
-            initial_translation_m = np.array(diag0["provisional_t_lidar_camera_m"])
+            t_lidar_camera = np.array(diag0["provisional_t_lidar_camera_m"])
+            initial_translation_m = -ri_camera_lidar @ t_lidar_camera
     R0 = np.asarray(initial_rotation, dtype=np.float64)
     t0 = np.asarray(initial_translation_m, dtype=np.float64)
     s0 = float(initial_scale)
