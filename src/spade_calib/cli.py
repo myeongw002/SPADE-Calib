@@ -161,7 +161,7 @@ def main(argv: list[str] | None = None) -> int:
             from spade_calib.evaluation.kitti import evaluate_handeye_json
             report = evaluate_handeye_json(args.result, args.calib,
                                            camera_index=args.camera_index)
-            rendered = json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + '\\n'
+            rendered = json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + '\n'
             if args.output:
                 args.output.parent.mkdir(parents=True, exist_ok=True)
                 args.output.write_text(rendered, encoding='utf-8')
