@@ -114,7 +114,9 @@ def test_camera_sfm_clock_mismatch_and_duplicate_timestamps():
 def test_recording_index_requires_sfm_and_lidar_availability():
     glim,images=synthetic_data()
     class Timed:
-        def __init__(self,n): self.relative_path=n
+        def __init__(self,n):
+            self.relative_path=n
+            self.timestamp_ns=int(n.split('/')[-1].split('.')[0])
     class A:
         def __init__(self,img,yes):
             self.image=Timed(img.name)
