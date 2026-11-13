@@ -39,10 +39,27 @@ def test_camera_lidar_residual_matches_inverse_equation_norm():
     old_rot = Rotation.from_matrix(np.swapaxes(old_left, 1, 2) @ old_right).as_rotvec()
     old_t = (np.einsum('nij,j->ni', ra - np.eye(3), t_LC) + ta
              - s * np.einsum('ij,nj->ni', R_LC, tb))
-    # Both residual norms must agree pairwise under an orthogonal frame change.
+    # Rotation geodesic norms are invariant to the inverse convention.
     np.testing.assert_allclose(np.linalg.norm(new_res[:, :3], axis=1),
                                np.linalg.norm(old_rot, axis=1), rtol=1e-10, atol=1e-10)
-    np.testing.assert_allclose(new_res[:, 3:], -(R_CL @ old_t.T).T,
+    # With inconsistent noisy rotations, the two *translation residual
+    # definitions* differ by a term proportional to rotational inconsistency.
+    # They coincide (up to an orthogonal frame change) when B R_CL = R_CL A.
+    cross_term = np.einsum(
+        'nij,j->ni', rb - np.einsum('ij,njk,kl->nil', R_CL, ra, R_LC), t_CL)
+    np.testing.assert_allclose(
+        new_res[:, 3:] + (R_CL @ old_t.T).T, cross_term,
+        rtol=1e-10, atol=1e-10)
+
+    # Exact-consistency test: rotation relations agree and translation
+    # residuals are related by an orthogonal rotation, even off the t optimum.
+    rb_consistent = np.einsum('ij,njk,kl->nil', R_CL, ra, R_LC)
+    p2 = MotionPairs(ra, ta, rb_consistent, tb,
+                     pairs.indices.copy(), pairs.starts_ns.copy())
+    new2 = residuals(p2, R_CL, t_CL, s)
+    old2 = ((np.einsum('nij,j->ni', ra - np.eye(3), t_LC) + ta)
+            - s * np.einsum('ij,nj->ni', R_LC, tb))
+    np.testing.assert_allclose(new2[:, 3:], -(R_CL @ old2.T).T,
                                rtol=1e-10, atol=1e-10)
 
 
