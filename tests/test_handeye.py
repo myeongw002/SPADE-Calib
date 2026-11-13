@@ -55,11 +55,11 @@ def test_exact_recovery_and_small_residual():
     result = fit_full_trajectory(samples)
     assert result.diagnostics['converged']
     assert result.pairs.count > 20
-    assert Rotation.from_matrix(result.rotation_lidar_camera @ RX.T).magnitude() < 1e-8
-    np.testing.assert_allclose(result.translation_lidar_camera_m,t,atol=1e-8)
+    assert Rotation.from_matrix(result.rotation_camera_lidar @ RX).magnitude() < 1e-8
+    np.testing.assert_allclose(result.translation_camera_lidar_m,-RX.T @ t,atol=1e-8)
     assert result.sfm_scale_to_metric == pytest.approx(s, abs=1e-8)
-    assert np.max(np.abs(residuals(result.pairs,result.rotation_lidar_camera,
-                                   result.translation_lidar_camera_m,result.sfm_scale_to_metric))) < 1e-8
+    assert np.max(np.abs(residuals(result.pairs,result.rotation_camera_lidar,
+                                   result.translation_camera_lidar_m,result.sfm_scale_to_metric))) < 1e-8
 
 
 def test_joint_jacobian_and_marginal_covariance():
@@ -73,7 +73,7 @@ def test_joint_jacobian_and_marginal_covariance():
     direct=np.linalg.inv(np.array(info['information_matrix_7x7'])[:6,:6])
     assert np.linalg.norm(sigma-direct) > 1e-8, 'scale must be marginalized, not fixed'
     assert np.min(np.linalg.eigvalsh(sigma)) > -1e-12
-    assert len(info['model_based_extrinsic_standard_deviations']['rotation_lidar_axis_deg']) == 3
+    assert len(info['model_based_extrinsic_standard_deviations']['rotation_camera_axis_deg']) == 3
     assert len(info['model_based_extrinsic_correlation_matrix_6x6']) == 6
 
 
@@ -81,8 +81,8 @@ def test_degenerate_yaw_motion_refuses_covariance():
     samples,_,_,_=make_samples('yaw')
     pair=build_motion_pairs(samples,int(samples.timestamps_ns[0]),int(samples.timestamps_ns[-1]),SelectionSettings())
     # known-correct init: due to yaw-only, a subset of extrinsic parameters is not identifiable
-    fit=fit_motion_pairs(pair, HandEyeSettings(),initial_rotation=Rotation.from_euler('xyz',[.11,-.06,.18]).as_matrix(),
-                        initial_translation_m=np.array([.13,-.07,.18]),initial_scale=7.8)
+    fit=fit_motion_pairs(pair, HandEyeSettings(),initial_rotation=Rotation.from_euler('xyz',[.11,-.06,.18]).as_matrix().T,
+                        initial_translation_m=-Rotation.from_euler('xyz',[.11,-.06,.18]).as_matrix().T @ np.array([.13,-.07,.18]),initial_scale=7.8)
     result=analyze_local_uncertainty(fit)
     assert not result['full_rank']
     assert not result['covariance_available']
@@ -110,7 +110,7 @@ def test_bootstrap_deterministic_and_serializable(tmp_path):
     loaded=json.loads(path.read_text())
     assert loaded['observability_and_model_covariance']['covariance_available']
     assert loaded['bootstrap']['available']
-    assert loaded['handeye']['T_lidar_camera'][3]==[0,0,0,1]
+    assert loaded['handeye']['T_camera_lidar'][3]==[0,0,0,1]
 
 
 def test_bootstrap_not_enough_blocks():
@@ -132,8 +132,8 @@ def test_bootstrap_settings_validation():
 def test_pure_straight_motion_is_rank_deficient():
     samples,R,t,s=make_samples('straight')
     pairs=build_motion_pairs(samples,int(samples.timestamps_ns[0]),int(samples.timestamps_ns[-1]),SelectionSettings())
-    fit=fit_motion_pairs(pairs,HandEyeSettings(),initial_rotation=R,
-                        initial_translation_m=t,initial_scale=s)
+    fit=fit_motion_pairs(pairs,HandEyeSettings(),initial_rotation=R.T,
+                        initial_translation_m=-R.T @ t,initial_scale=s)
     analysis=analyze_local_uncertainty(fit)
     assert analysis['rank'] < 7
     assert not analysis['covariance_available']
