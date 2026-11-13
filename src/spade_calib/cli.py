@@ -28,6 +28,12 @@ def _parser() -> argparse.ArgumentParser:
     select.add_argument('--sfm', type=Path, help='COLMAP images.bin/images.txt/camera_poses.csv, needed with --glim')
     select.add_argument('--camera-to-lidar-offset-ns', type=int, default=0,
                         help='Explicit image-clock to GLIM-clock offset, with --glim only')
+    select.add_argument('--image-timestamps', type=Path,
+                        help='CSV file,filename + timestamp_ns for custom non-timestamped images')
+    select.add_argument('--kitti-times', type=Path,
+                        help='KITTI Odometry times.txt; pair poses by frame index rather than clock')
+    select.add_argument('--glim-first-frame', type=int, default=0,
+                        help='Frame number corresponding to first GLIM pose in KITTI frame mode')
     select.add_argument('--output', type=Path, required=True)
     select.add_argument('--window-s', type=float, default=30.0)
     select.add_argument('--window-stride-s', type=float, default=15.0)
@@ -44,6 +50,12 @@ def _parser() -> argparse.ArgumentParser:
     source.add_argument('--glim', type=str, help='GLIM trajectory TXT (archived trajectory-only mode)')
     handeye.add_argument('--sfm', type=str, help='COLMAP images file or pycolmap camera_poses.csv')
     handeye.add_argument('--camera-to-lidar-offset-ns', type=int, default=0)
+    handeye.add_argument('--image-timestamps', type=Path,
+                         help='CSV file,filename + timestamp_ns for custom image names')
+    handeye.add_argument('--kitti-times', type=Path,
+                         help='KITTI Odometry times.txt; pair by frame index')
+    handeye.add_argument('--glim-first-frame', type=int, default=0,
+                         help='Frame corresponding to the first GLIM pose in KITTI mode')
     handeye.add_argument('--output', type=str, required=True)
     handeye.add_argument('--pair-baseline-s', type=float, default=2.0)
     handeye.add_argument('--pair-stride-s', type=float, default=1.0)
@@ -97,8 +109,10 @@ def main(argv: list[str] | None = None) -> int:
                 regularizer=args.regularizer,
             )
             if args.config is not None:
-                if args.sfm is not None or args.camera_to_lidar_offset_ns != 0:
-                    raise ValueError('With --config, SfM and clock offset must come from recording YAML')
+                if (args.sfm is not None or args.camera_to_lidar_offset_ns != 0
+                        or args.image_timestamps is not None or args.kitti_times is not None
+                        or args.glim_first_frame != 0):
+                    raise ValueError('With --config, input and timestamp policy must come from recording YAML')
                 from spade_calib.io.recording import load_recording_config, index_recording
                 index = index_recording(load_recording_config(args.config))
                 samples = from_recording_index(index)
@@ -107,10 +121,22 @@ def main(argv: list[str] | None = None) -> int:
                 if args.sfm is None:
                     raise ValueError('--sfm is required with --glim')
                 index = None
-                samples = load_trajectory_data(
-                    args.glim, args.sfm,
-                    camera_to_lidar_offset_ns=args.camera_to_lidar_offset_ns,
-                )
+                if args.kitti_times is not None:
+                    from spade_calib.io.kitti import load_kitti_trajectory_data
+                    if args.image_timestamps is not None or args.camera_to_lidar_offset_ns != 0:
+                        raise ValueError('KITTI frame mode cannot combine with clock offset or timestamp CSV')
+                    samples = load_kitti_trajectory_data(
+                        args.glim, args.sfm, args.kitti_times,
+                        glim_first_frame=args.glim_first_frame,
+                    )
+                else:
+                    if args.glim_first_frame != 0:
+                        raise ValueError('--glim-first-frame requires --kitti-times')
+                    samples = load_trajectory_data(
+                        args.glim, args.sfm,
+                        camera_to_lidar_offset_ns=args.camera_to_lidar_offset_ns,
+                        image_timestamps_csv=args.image_timestamps,
+                    )
                 stamps = None
             report = select_scenes(samples, cfg, lidar_scan_stamps_ns=stamps)
             write_scene_selection(report, args.output, index=index)
