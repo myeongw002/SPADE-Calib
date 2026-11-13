@@ -58,7 +58,11 @@ def filter_cloud(cloud: AccumulatedCloud, keep: NDArray[np.bool_]) -> Accumulate
     if keep.shape != (len(cloud.xyz),):
         raise ValueError('Filtering mask has wrong shape')
     return AccumulatedCloud(
-        cloud.xyz[keep], cloud.scan_id[keep], cloud.time_offset_s[keep],
-        cloud.ring[keep], cloud.source_return_index[keep],
+        cloud.xyz[keep], cloud.scan_id[keep],
+        cloud.time_offset_s[keep] if cloud.time_offset_s is not None else None,
+        cloud.ring[keep] if cloud.ring is not None else None,
+        cloud.source_return_index[keep],
         cloud.reference_timestamp_ns, cloud.frame_id,
+        intensity=cloud.intensity[keep] if cloud.intensity is not None else None,
+        motion_model=cloud.motion_model,
     )
