@@ -30,6 +30,10 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 from spade_calib.evaluation.kitti import parse_kitti_odom_calib
+from spade_calib.selection.sfm_planes import (
+    ImageGeometry, PlaneObservation, PlanePoint, PlaneScreenSettings,
+    screen_window_planes,
+)
 
 LOG = logging.getLogger('kitti_gt_sfm_scenes')
 PRESET_WINDOWS = {'005': (37.5, 52.5), '012': (90.0, 105.0)}
@@ -459,7 +463,8 @@ def _iter_points(path: Path):
 
 def _score_scene(base: Path, scene: dict[str, Any], args: argparse.Namespace, *,
                  global_images: dict[int, dict[str, Any]] | None = None,
-                 source_model: Path | None = None) -> dict[str, Any]:
+                 source_model: Path | None = None,
+                 plane_records: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """Score only in-window feature observations.
 
     With global_images, XYZ is triangulated from the FULL sequence even though
@@ -485,6 +490,7 @@ def _score_scene(base: Path, scene: dict[str, Any], args: argparse.Namespace, *,
     all_points = qualified = 0
     external_tracks = external_qualified = 0
     lengths, parallax, reproj = [], [], []
+    window_points: list[PlanePoint] = []
     points_path = (source_model if source_model is not None
                    else base / 'sparse_txt' / 'points3D.txt')
     for point_id, xyz, full_track in _iter_points(points_path):
@@ -537,6 +543,17 @@ def _score_scene(base: Path, scene: dict[str, Any], args: argparse.Namespace, *,
         qualified += 1
         if observed_outside:
             external_qualified += 1
+        if args.selection_metric == 'plane':
+            window_points.append(PlanePoint(
+                xyz=xyz.copy(),
+                observations=tuple(
+                    PlaneObservation(int(img_id), float(xy[0]), float(xy[1]))
+                    for img_id, xy in good_observations
+                    if 0 <= xy[0] < width and 0 <= xy[1] < height
+                ),
+                reprojection_px=pixel_error, parallax_deg=angle,
+                has_outside_observations=observed_outside,
+            ))
         lengths.append(len(good_observations))
         parallax.append(angle)
         reproj.append(pixel_error)
@@ -553,7 +570,7 @@ def _score_scene(base: Path, scene: dict[str, Any], args: argparse.Namespace, *,
     # Heuristic ranking, NOT Fisher information or calibrated extrinsic utility.
     score = (float(np.log1p(points_per_image) * np.log1p(median_parallax)
                    * mean_grid / (1. + median_error)) if qualified else 0.)
-    return {
+    row = {
         'name': scene['name'], 'start_s': scene['start_s'], 'stop_s': scene['stop_s'],
         'image_count': n_images, 'triangulated_points': all_points,
         'qualified_points': qualified, 'qualified_fraction': qualified / max(all_points, 1),
@@ -568,8 +585,32 @@ def _score_scene(base: Path, scene: dict[str, Any], args: argparse.Namespace, *,
         'reproj_p95_px': float(np.percentile(reproj, 95)) if reproj else 0.,
         'mean_image_grid_coverage': mean_grid,
         'geometry_score_heuristic': score,
-        'eligible': qualified >= args.min_qualified_points,
+        'feature_eligible': qualified >= args.min_qualified_points,
     }
+    if args.selection_metric == 'plane':
+        plane_cfg = _plane_config(args)
+        plane_images = {
+            i: ImageGeometry(
+                width=width, height=height,
+                R_cw=mats[i][:3, :3].copy()
+            ) for i in images
+        }
+        plane_stats, planes = screen_window_planes(
+            window_points, plane_images, plane_cfg,
+        )
+        row.update(plane_stats)
+        row['eligible'] = bool(
+            row['feature_eligible']
+            and plane_stats['plane_translation_normal_proxy_sufficient']
+        )
+        row['selection_score'] = float(plane_stats['plane_score_heuristic'])
+        if plane_records is not None:
+            for plane in planes:
+                plane_records.append({'scene': scene['name'], **plane})
+    else:
+        row['eligible'] = row['feature_eligible']
+        row['selection_score'] = score
+    return row
 
 
 def evaluate(args: argparse.Namespace) -> int:
