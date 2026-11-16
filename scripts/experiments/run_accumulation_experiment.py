@@ -22,7 +22,8 @@ import numpy as np
 from numpy.typing import NDArray
 
 from spade_calib.io.kitti_bin import load_kitti_bin_scan
-from spade_calib.lidar import GlimTrajectory, accumulate_glim, JointSettings, solve_joint
+from spade_calib.lidar import (GlimTrajectory, accumulate_glim, JointSettings,
+                              PGOSettings, solve_joint, solve_pgo)
 from spade_calib.lidar.joint_solver import voxel_sample
 
 LOG = logging.getLogger('spade_accum')
@@ -467,7 +468,8 @@ def validate_cli(args: argparse.Namespace) -> None:
         raise ValueError('Invalid point caps')
     if (args.ransac_iters < 1 or args.ransac_threshold_m <= 0 or args.voxel_m <= 0
             or args.refine_iterations < 1 or args.refine_max_samples < 24
-            or args.refine_voxel_m <= 0 or not (0 < args.wall_normal_tol_deg <= 90)):
+            or args.refine_voxel_m <= 0 or args.pgo_iterations < 1 or args.pgo_pair_max_nfev < 1
+            or not (0 < args.wall_normal_tol_deg <= 90)):
         raise ValueError('Invalid RANSAC/voxel settings')
     if args.roi is not None and any(args.roi[i] >= args.roi[i+1] for i in (0, 2, 4)):
         raise ValueError('ROI bounds must be min < max')
@@ -493,10 +495,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--dry-run', action='store_true', help='Select frames without loading LiDAR data')
     p.add_argument('--match-scan-budget', action='store_true',
                    help='Add closest-pose selection with exactly the same scan budget as Fixed Frame; NOT fixed-radius')
-    p.add_argument('--refiner', choices=['joint', 'none'], default='joint')
+    p.add_argument('--refiner', choices=['joint', 'pgo', 'none'], default='joint')
     p.add_argument('--refine-iterations', type=int, default=4)
     p.add_argument('--refine-voxel-m', type=float, default=.16)
     p.add_argument('--refine-max-samples', type=int, default=2500)
+    p.add_argument('--pgo-iterations', type=int, default=4)
+    p.add_argument('--pgo-pair-max-nfev', type=int, default=38)
     p.add_argument('--min-range-m', type=float, default=1.0)
     p.add_argument('--max-range-m', type=float, default=70.0)
     p.add_argument('--voxel-m', type=float, default=.14, help='Plane/PLY uniform voxel sampling')
@@ -566,31 +570,46 @@ def main(argv: list[str] | None = None) -> int:
             corrections = None
             refine_info: list[dict[str, Any]] = []
             datasets = [('initial', raw.xyz, raw.scan_id)]
-            if args.refiner == 'joint':
+            if args.refiner in ('joint', 'pgo'):
                 cfg = JointSettings(anchor_scan_id=anchor_local, d1_roi=False,
                                     iterations=args.refine_iterations,
                                     voxel_m=args.refine_voxel_m,
                                     max_samples_per_scan=args.refine_max_samples,
                                     seed=args.seed)
-                result = solve_joint(raw, settings=cfg)
-                # Safeguard against silent disconnected scans: at minimum require
-                # a meaningful number of paired constraints. Exact graph
-                # connectivity requires a separate match-pair inspection.
+                if args.refiner == 'joint':
+                    result = solve_joint(raw, settings=cfg)
+                    solver_name = 'spade_calib.lidar.joint_solver.solve_joint'
+                    solver_settings = asdict(cfg)
+                else:
+                    pgo_cfg = PGOSettings(pairs=cfg, iterations=args.pgo_iterations,
+                                          pair_max_nfev=args.pgo_pair_max_nfev)
+                    result = solve_pgo(raw, settings=pgo_cfg)
+                    solver_name = 'spade_calib.lidar.pgo_solver.solve_pgo'
+                    solver_settings = asdict(pgo_cfg)
+                if (result.anchor_scan_id != anchor_local or
+                        result.transforms.shape != (len(frames), 4, 4) or
+                        result.xyz.shape != raw.xyz.shape or
+                        not np.isfinite(result.transforms).all() or
+                        not np.allclose(result.transforms[anchor_local], np.eye(4), atol=1e-8)):
+                    raise RuntimeError(f'{args.refiner}: invalid scan correction transforms')
+                # Joint uses 'pairs'/'matches'; PGO uses 'pair_edges'/'matched_returns'.
                 refine_info = list(result.iterations)
-                if refine_info and refine_info[0].get('pairs', 0) < len(frames) - 1:
-                    LOG.warning('%s: only %s matched pair edges for %s scans; pose graph cannot be fully connected',
-                                plan.name, refine_info[0].get('pairs'), len(frames))
+                n_edges = (refine_info[0].get('pairs', refine_info[0].get('pair_edges', 0))
+                           if refine_info else 0)
+                if n_edges < len(frames) - 1:
+                    LOG.warning('%s: only %s matched pair edges for %s scans; graph cannot be connected',
+                                plan.name, n_edges, len(frames))
                 corrections = result.corrections
                 datasets.append(('refined', result.xyz, raw.scan_id))
                 np.save(out / 'refined_corrections.npy', result.corrections)
                 np.save(out / 'refined_transforms.npy', result.transforms)
                 (out / 'refinement.json').write_text(json.dumps({
-                    'solver': 'spade_calib.lidar.joint_solver.solve_joint',
+                    'solver': solver_name,
                     'original_scan_frames': list(plan.selected),
                     'anchor_scan_id': anchor_local,
                     'scan_centered_transform_convention': 'p_new = R (p - center) + center + t',
                     'iterations': refine_info,
-                    'joint_settings': asdict(cfg),
+                    'settings': solver_settings,
                     'note': 'Registration quality is not extrinsic calibration ground truth',
                 }, indent=2, allow_nan=False), encoding='utf-8')
             for stage, pts, ids in datasets:
@@ -614,8 +633,10 @@ def main(argv: list[str] | None = None) -> int:
                 row[f'{stage}_ground_count'] = sum(r['kind']=='ground' for r in detected)
                 row[f'{stage}_non_ground_count'] = sum(r['kind']=='non_ground' for r in detected)
             row.update(status='ok', source_points=source_count,
-                       registration_pair_edges_first=refine_info[0].get('pairs') if refine_info else None,
-                       registration_pair_matches_first=refine_info[0].get('matches') if refine_info else None,
+                       registration_pair_edges_first=(refine_info[0].get('pairs', refine_info[0].get('pair_edges'))
+                                                      if refine_info else None),
+                       registration_pair_matches_first=(refine_info[0].get('matches', refine_info[0].get('matched_returns'))
+                                                        if refine_info else None),
                        graph_connectivity_verified=False)
         row['runtime_sec'] = time.perf_counter() - t0
         summary_rows.append(row)
