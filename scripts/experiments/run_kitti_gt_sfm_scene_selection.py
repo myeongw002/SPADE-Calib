@@ -711,24 +711,19 @@ def evaluate(args: argparse.Namespace) -> int:
         raise ValueError('Invalid geometry quality constraints')
     _, scenes = _scene_entries(args.out)
     rows = []
+    plane_records: list[dict[str, Any]] = []
     for scene in scenes:
         base = args.out / scene['name']
         if not (base / 'sparse_txt' / 'points3D.txt').is_file():
             raise FileNotFoundError(f"Run reconstruct for scene {scene['name']} first")
-        row = _score_scene(base, scene, args)
+        row = _score_scene(base, scene, args, plane_records=plane_records)
         rows.append(row)
-        LOG.info('%s: qualified=%d (%.1f/frame), median parallax=%.2f°, grid=%.3f',
-                 row['name'], row['qualified_points'],
-                 row['qualified_points_per_image'], row['median_parallax_deg'],
-                 row['mean_image_grid_coverage'])
-    ranked = sorted([x for x in rows if x['eligible']],
-                    key=lambda x: (-x['geometry_score_heuristic'], x['start_s'], x['name']))
-    selected = []
-    for row in ranked:
-        if (len(selected) < args.max_scenes and all(
-                row['stop_s'] <= s['start_s'] or row['start_s'] >= s['stop_s']
-                for s in selected)):
-            selected.append(row)
+        LOG.info('%s: qualified=%d, planes=%s, normal_rank=%s, eligible=%s, score=%.4f',
+                 row['name'], row['qualified_points'], row.get('plane_count'),
+                 row.get('plane_normal_rank'), row['eligible'], row['selection_score'])
+    ranked, selected = _select_scene_rows(rows, args)
+    if args.selection_metric == 'plane':
+        _plane_details_file(args.out, 'local', plane_records)
     fields = list(rows[0])
     with (args.out / 'scene_scores.csv').open('w', newline='', encoding='utf-8') as fh:
         writer = csv.DictWriter(fh, fieldnames=fields)
@@ -740,13 +735,17 @@ def evaluate(args: argparse.Namespace) -> int:
                    if k not in ('func',) and not isinstance(v, Path)},
         'scenes_ranked': ranked, 'scenes_selected': selected, 'all_candidates': rows,
         'scenes_selected_count': len(selected),
-        'selection_basis': 'heuristic_sparse_feature_track_geometry_not_calibration_accuracy',
+        'selection_basis': ('heuristic_window_supported_plane_normal_diversity'
+                            if args.selection_metric == 'plane'
+                            else 'heuristic_sparse_feature_track_geometry_not_calibration_accuracy'),
         'caveats': [
             'KITTI camera poses are GT reference; triangulated points are not GT.',
             'Only independently reconstructed scene tracks contribute: no cross-window tracks.',
             'Point abundance is influenced by scene texture/lighting, not just geometry.',
             'Track parallax and reprojection error do not measure LiDAR-camera calibration utility.',
             'Windows are ranked by an explicit non-probabilistic heuristic score.',
+            'Plane rank and normal logdet constrain translation-normal diversity only, not 6DoF extrinsics.',
+            'Plane sufficiency thresholds are heuristic and must be checked by GT extrinsic evaluation.',
             'Unverified KITTI camera/LiDAR synchronization and dynamic objects remain limitations.',
         ],
     }
