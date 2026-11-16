@@ -61,7 +61,11 @@ Output changes:
   triangulated points with outside-window observations.
 - scene_comparison.csv/json: local/global plane count, rank,
   plane-score, sufficiency flags, global outside-window support counts,
-  rank changes, top-K overlap and selected-set Jaccard.
+  rank changes, top-K overlap and selected-set Jaccard. For matched planes,
+  the comparison also computes sign-invariant plane-normal angular differences
+  and symmetric centroid-to-plane separation using a 15deg / 2x RANSAC
+  threshold gate. This is a geometric plane match proxy, not a calibrated
+  Camera-LiDAR correspondence.
 - scene_selection.json and global_scene_selection.json: ranked scene records
   and non-overlapping greedy-selected candidate records.
 
