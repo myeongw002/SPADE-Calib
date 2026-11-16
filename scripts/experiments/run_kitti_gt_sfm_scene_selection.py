@@ -772,17 +772,13 @@ def evaluate_global(args: argparse.Namespace) -> int:
     points = base / 'sparse_txt' / 'points3D.txt'
     if not points.is_file():
         raise FileNotFoundError('Missing global points3D.txt')
-    rows = [_score_scene(base, scene, args, global_images=images, source_model=points)
+    plane_records: list[dict[str, Any]] = []
+    rows = [_score_scene(base, scene, args, global_images=images,
+                         source_model=points, plane_records=plane_records)
             for scene in scenes]
-    ranked = sorted((r for r in rows if r['eligible']),
-                    key=lambda r: (-r['geometry_score_heuristic'],
-                                   r['start_s'], r['name']))
-    selected = []
-    for row in ranked:
-        if (len(selected) < args.max_scenes and
-                all(row['stop_s'] <= x['start_s'] or row['start_s'] >= x['stop_s']
-                    for x in selected)):
-            selected.append(row)
+    ranked, selected = _select_scene_rows(rows, args)
+    if args.selection_metric == 'plane':
+        _plane_details_file(args.out, 'global', plane_records)
     with (args.out / 'global_scene_scores.csv').open(
             'w', newline='', encoding='utf-8') as fh:
         writer = csv.DictWriter(fh, fieldnames=list(rows[0]))
@@ -793,6 +789,9 @@ def evaluate_global(args: argparse.Namespace) -> int:
         'kind': 'gt_fixed_camera_pose_global_sfm_window_geometry_selection',
         'model_scope': 'all_KITTI_camera_frames',
         'score_scope': 'global_xyz_with_in_window_feature_observations',
+        'selection_basis': ('heuristic_window_supported_plane_normal_diversity'
+                            if args.selection_metric == 'plane'
+                            else 'heuristic_sparse_feature_track_geometry'),
         'config': {k: v for k, v in vars(args).items()
                    if k != 'func' and not isinstance(v, Path)},
         'scenes_ranked': ranked, 'scenes_selected': selected,
@@ -802,6 +801,8 @@ def evaluate_global(args: argparse.Namespace) -> int:
             'Window-only parallax/reprojection checks do not remove XYZ data leakage.',
             'Feature count and coverage depend on image texture, not just 3D geometry.',
             'No calibration was run; scene scores are not extrinsic accuracy.',
+            'Window-local plane fitting uses global XYZ; do NOT confuse with local retriangulation.',
+            'Normal information is a translation-only proxy, not full calibration observability.',
         ],
     })
     LOG.info('Global SfM scoring finished: %d candidates, %d selected',
