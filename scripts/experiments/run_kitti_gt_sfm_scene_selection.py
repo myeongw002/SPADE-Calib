@@ -819,8 +819,24 @@ def compare(args: argparse.Namespace) -> int:
     if (local.get('kind') != 'gt_fixed_camera_pose_sparse_sfm_scene_selection'
             or glob.get('kind') != 'gt_fixed_camera_pose_global_sfm_window_geometry_selection'):
         raise ValueError('Expected independent Local and Global SfM evaluation reports')
-    for key in ('min_track', 'min_parallax_deg', 'max_reproj_px',
-                'grid_x', 'grid_y', 'min_qualified_points', 'max_scenes'):
+    equal_settings = [
+        'min_track', 'min_parallax_deg', 'max_reproj_px', 'grid_x',
+        'grid_y', 'min_qualified_points', 'max_scenes', 'selection_metric',
+    ]
+    if local['config'].get('selection_metric') == 'plane':
+        equal_settings += [
+            'plane_threshold_m', 'plane_min_inliers', 'plane_max_planes',
+            'plane_max_points', 'plane_ransac_iters', 'plane_neighbors',
+            'plane_connectivity_factor', 'plane_min_width_ratio',
+            'plane_min_visible_frames', 'plane_min_image_observations',
+            'plane_min_hull_fraction', 'plane_min_grid_cells',
+            'plane_information_weight', 'plane_regularizer',
+            'plane_min_normal_rank', 'plane_normal_rank_ratio',
+            'plane_min_eigen_fraction', 'plane_min_planes',
+            'plane_exclude_ground', 'plane_ground_angle_deg',
+            'plane_weak_motion_guidance', 'plane_seed',
+        ]
+    for key in equal_settings:
         if local['config'].get(key) != glob['config'].get(key):
             raise ValueError(f'Local/Global settings differ in {key}; rerun with equal settings')
     l = {row['name']: row for row in local['all_candidates']}
@@ -833,7 +849,7 @@ def compare(args: argparse.Namespace) -> int:
             raise ValueError(f'Window boundaries or image budgets differ: {name}')
     def order(scores: dict[str, dict[str, Any]]) -> list[str]:
         return sorted(scores, key=lambda n: (
-            not scores[n]['eligible'], -scores[n]['geometry_score_heuristic'],
+            not scores[n]['eligible'], -scores[n].get('selection_score', scores[n]['geometry_score_heuristic']),
             scores[n]['start_s'], n))
     lnames, gnames = order(l), order(g)
     lranks = {n: i + 1 for i, n in enumerate(lnames)}
@@ -847,8 +863,19 @@ def compare(args: argparse.Namespace) -> int:
             'local_rank': lranks[name], 'global_rank': granks[name],
             'rank_shift_global_minus_local': granks[name] - lranks[name],
             'local_eligible': a['eligible'], 'global_eligible': b['eligible'],
-            'local_score': a['geometry_score_heuristic'],
-            'global_score': b['geometry_score_heuristic'],
+            'local_score': a.get('selection_score', a['geometry_score_heuristic']),
+            'global_score': b.get('selection_score', b['geometry_score_heuristic']),
+            'local_feature_score': a['geometry_score_heuristic'],
+            'global_feature_score': b['geometry_score_heuristic'],
+            'local_plane_count': a.get('plane_count'),
+            'global_plane_count': b.get('plane_count'),
+            'local_plane_normal_rank': a.get('plane_normal_rank'),
+            'global_plane_normal_rank': b.get('plane_normal_rank'),
+            'local_plane_sufficient': a.get('plane_translation_normal_proxy_sufficient'),
+            'global_plane_sufficient': b.get('plane_translation_normal_proxy_sufficient'),
+            'local_plane_score': a.get('plane_score_heuristic'),
+            'global_plane_score': b.get('plane_score_heuristic'),
+            'global_plane_external_xyz_points': b.get('plane_external_xyz_point_count'),
             'local_qualified_points': a['qualified_points'],
             'global_qualified_points': b['qualified_points'],
             'global_qualified_points_with_outside_obs':
@@ -876,6 +903,7 @@ def compare(args: argparse.Namespace) -> int:
         'schema_version': 1,
         'kind': 'kitti_gt_sfm_local_vs_global_scene_comparison',
         'candidate_count': len(l),
+        'selection_metric': local['config'].get('selection_metric', 'feature'),
         'local_selected': sorted(select_l), 'global_selected': sorted(select_g),
         'selected_intersection': sorted(select_l & select_g),
         'selected_jaccard': len(select_l & select_g) / max(len(select_l | select_g), 1),
@@ -890,6 +918,8 @@ def compare(args: argparse.Namespace) -> int:
             'Equal windows, frame counts and geometric thresholds do not equalize '
             'feature matching / triangulation information.',
             'Both methods share the same heuristic, not a calibration metric.',
+            'Plane normal information is 3D translation-normal diversity, not a full 6DoF FIM.',
+            'Plane sufficiency is a thresholded heuristic, not extrinsic-calibration sufficiency.',
             'Two disjoint windows and max_scenes=2 trivially select both, regardless of ranks.',
             'Tied scores are ordered deterministically by start time and ID.',
         ],
