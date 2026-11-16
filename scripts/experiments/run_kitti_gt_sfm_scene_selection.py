@@ -589,14 +589,17 @@ def _score_scene(base: Path, scene: dict[str, Any], args: argparse.Namespace, *,
     }
     if args.selection_metric == 'plane':
         plane_cfg = _plane_config(args)
+        # Explicit chronological order matters for optional motion guidance.
+        image_by_name = {record['name']: i for i, record in images.items()}
         plane_images = {
-            i: ImageGeometry(
+            image_by_name[name]: ImageGeometry(
                 width=width, height=height,
-                R_cw=mats[i][:3, :3].copy()
-            ) for i in images
+                R_cw=mats[image_by_name[name]][:3, :3].copy()
+            ) for name in scene['image_names']
         }
         plane_stats, planes = screen_window_planes(
             window_points, plane_images, plane_cfg,
+            globally_triangulated=is_global,
         )
         row.update(plane_stats)
         row['eligible'] = bool(
