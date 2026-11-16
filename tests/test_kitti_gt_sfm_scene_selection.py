@@ -427,3 +427,30 @@ def test_plane_mode_end_to_end_selects_normal_diverse_scene(tmp_path: Path):
     assert details['plane_count'] >= 3
     assert all(p['window_only_triangulation'] is True
                for p in details['planes'])
+
+
+
+def test_local_global_plane_match_handles_normal_sign_and_spatial_offset():
+    local = [{
+        'normal_world_xyz': [1., 0., 0.], 'offset_m': -2.,
+        'centroid_world_xyz': [2., 1., 0.]
+    }]
+    same_wall_flipped = [{
+        'normal_world_xyz': [-1., 0., 0.], 'offset_m': 2.,
+        'centroid_world_xyz': [2., -1., 0.]
+    }]
+    comparison = sfm._compare_plane_sets(
+        local, same_wall_flipped, distance_threshold_m=.25
+    )
+    assert comparison['matched_plane_count'] == 1
+    assert comparison['plane_normal_angle_median_deg'] == 0.
+    assert comparison['plane_offset_median_m'] == 0.
+    far_parallel_wall = [{
+        'normal_world_xyz': [1., 0., 0.], 'offset_m': -20.,
+        'centroid_world_xyz': [20., 1., 0.]
+    }]
+    comparison = sfm._compare_plane_sets(
+        local, far_parallel_wall, distance_threshold_m=.25
+    )
+    assert comparison['matched_plane_count'] == 0
+    assert comparison['plane_normal_angle_median_deg'] is None
