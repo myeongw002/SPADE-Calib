@@ -26,7 +26,7 @@ sys.modules[spec.name] = sfm
 spec.loader.exec_module(sfm)
 
 
-def make_kitti(root: Path, n: int = 31):
+def make_kitti(root: Path, n: int = 31, *, include_tr: bool = True):
     sequence = root / 'sequences' / '07'
     images = sequence / 'image_2'
     images.mkdir(parents=True)
@@ -40,7 +40,8 @@ def make_kitti(root: Path, n: int = 31):
     for i in range(4):
         p = p2 if i == 2 else p0
         calib_lines.append(f"P{i}: " + " ".join(f"{x:.12g}" for x in p.ravel()))
-    calib_lines.append('Tr: ' + ' '.join(map(str, np.column_stack((np.eye(3), np.zeros(3))).ravel())))
+    if include_tr:
+        calib_lines.append('Tr: ' + ' '.join(map(str, np.column_stack((np.eye(3), np.zeros(3))).ravel())))
     (sequence / 'calib.txt').write_text('\n'.join(calib_lines) + '\n')
     np.savetxt(sequence / 'times.txt', np.arange(n) * .1, fmt='%.9f')
     poses = np.repeat(np.eye(4)[None], n, axis=0)
@@ -197,3 +198,55 @@ def test_invalid_track_detection(tmp_path: Path):
     eva = sfm.build_parser().parse_args(['evaluate', '--out', str(out)])
     with pytest.raises(ValueError, match='POINT2D_IDX'):
         sfm._score_scene(base, scene, eva)
+
+
+def test_color_only_calib_without_lidar_tr_is_valid_for_gt_sfm(tmp_path: Path):
+    """KITTI data_odometry_color calib.txt has projections but may omit Tr."""
+    from spade_calib.evaluation.kitti import (
+        parse_kitti_odom_calib, kitti_gt_camera_lidar,
+    )
+
+    seq, poses = make_kitti(tmp_path, include_tr=False)
+    calib_path = seq / 'calib.txt'
+
+    camera_only = parse_kitti_odom_calib(calib_path, require_tr=False)
+    assert {'P0', 'P1', 'P2', 'P3'} <= camera_only.keys()
+    assert 'Tr' not in camera_only
+
+    # Preserve the strict safety check for camera–LiDAR GT evaluation.
+    with pytest.raises(ValueError, match='missing Tr'):
+        parse_kitti_odom_calib(calib_path)
+    with pytest.raises(ValueError, match='missing Tr'):
+        kitti_gt_camera_lidar(calib_path, camera_index=2)
+
+    times, twc2, k = sfm.load_kitti_camera_gt(
+        seq / 'times.txt', poses, calib_path, 2
+    )
+    assert len(times) == len(twc2) == 31
+    np.testing.assert_allclose(twc2[0, :3, 3], [.5, 0., 0.], atol=1e-10)
+    np.testing.assert_allclose(k, [[100., 0., 64.], [0., 100., 48.], [0., 0., 1.]])
+
+    # Full prepare works using camera-only calibrations and real scene metadata.
+    out = tmp_path / 'prepared_color_only'
+    assert sfm.main([
+        'prepare', '--sequence', str(seq), '--poses', str(poses), '--out', str(out),
+        '--sliding', '--window-s', '1', '--stride-s', '1', '--min-images', '6',
+        '--max-images', '6', '--camera', '2',
+    ]) == 0
+    assert len(json.loads((out / 'manifest.json').read_text())['scenes']) == 3
+
+
+def test_camera_only_calib_requires_p0_and_requested_p2(tmp_path: Path):
+    seq, poses = make_kitti(tmp_path, include_tr=False)
+    calib_path = seq / 'calib.txt'
+    src = calib_path.read_text()
+    calib_path.write_text('\n'.join(
+        line for line in src.splitlines() if not line.startswith('P2:')
+    ) + '\n')
+    with pytest.raises(ValueError, match='No P2'):
+        sfm.load_kitti_camera_gt(seq / 'times.txt', poses, calib_path, 2)
+    calib_path.write_text('\n'.join(
+        line for line in src.splitlines() if not line.startswith('P0:')
+    ) + '\n')
+    with pytest.raises(ValueError, match='missing P0'):
+        sfm.load_kitti_camera_gt(seq / 'times.txt', poses, calib_path, 2)
