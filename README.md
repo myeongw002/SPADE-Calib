@@ -195,6 +195,30 @@ Existing GLIM accumulation with per-point timestamps still supports
 `mode='deskew'`. Attempting that mode with KITTI `.bin` raises a clear error.
 See [KITTI raw scans](docs/dataset_adapters.md#kitti-raw-velodyne-bin-and-rigid-accumulation).
 
+## KITTI 07 Fixed-Frame vs Fixed-Distance Accumulation Pilot
+
+This experiment uses the existing `accumulate_glim(mode="rigid")` and
+`solve_joint()` to compare scan selection strategies in the same target LiDAR
+frame, then records provisional ground/non-ground plane quality diagnostics.
+
+~~~bash
+python -m pip install -e '.[research,dev]'
+python scripts/experiments/run_accumulation_experiment.py \
+  --times /data/kitti07/times.txt \
+  --odom /data/kitti07/odom_lidar.txt \
+  --window 005 --target-frame 384 \
+  --half-frames 5 --radii-m 5 \
+  --out outputs/kitti07_accumulation --dry-run
+~~~
+
+Remove `--dry-run` and supply `--velodyne /data/kitti07/velodyne`
+to run the actual accumulation and pose refinement. Explicitly verify
+the GLIM-to-KITTI pose row index association before using a different log.
+
+See [experiment guide](docs/experiments/kitti07_accumulation.md). The provided
+KITTI 07 data are **64-beam**, and detected planes are candidates rather than
+verified camera-LiDAR correspondences.
+
 ## Intended Pipeline
 
     SfM + GLIM -> Hand–Eye Initialization
