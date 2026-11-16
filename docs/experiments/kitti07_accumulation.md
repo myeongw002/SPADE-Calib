@@ -195,3 +195,14 @@ python -m pytest tests/test_accumulation_experiment.py -q
 저장소의 `tests/test_accumulation_experiment.py`는 **실제 SPADE-Calib 모듈**을 사용해 Scan Selection, Rigid Accumulation, RANSAC/품질 진단의 합성 데이터 스모크 테스트를 수행합니다. KITTI 07 원본 데이터를 이용한 Joint 6-DoF Refinement 정확도는 별도 검증이 필요합니다.
 
 이 스크립트 제작에 사용된 자료에는 KITTI07 `times.txt`/`odom_lidar.txt`는 있으나 Window 005/012의 전체 Velodyne `.bin` 파일은 없습니다. 따라서 제공된 궤적으로 **선택 Dry-run**을 했고, 실제 KITTI LiDAR를 사용한 Refinement 결과는 아직 없습니다.
+
+
+## PGO Refiner (existing scan accumulation pilot)
+
+This original pilot now supports --refiner pgo as well as --refiner joint and --refiner none. Example: add the following to the Window012 CLI shown above:
+
+    --refiner pgo --pgo-iterations 4 --pgo-pair-max-nfev 38
+
+The PGO backend is spade_calib.lidar.pgo_solver.solve_pgo with D1-specific ROI disabled. It starts from the original GLIM accumulated scan cloud and exports refined_scan_colors.ply, refined_transforms.npy, refined_corrections.npy, refinement.json, and the existing plane/preview diagnostics. The refinement.json 'solver' and 'settings' identify the actual backend. Its pair_edges and matched_returns diagnostics are mapped into the common registration_pair_edges_first / registration_pair_matches_first columns. For --refiner joint the existing 'refined_*' file names are unchanged.
+
+To compare Joint and PGO on *identical scan selections within a single oracle evaluation run*, use scripts/experiments/run_oracle_accumulation.py --refiner both; consult kitti07_oracle_accumulation.md. PGO here is pairwise point-to-plane registration with a linearized pose graph (not GLIM's own PGO).

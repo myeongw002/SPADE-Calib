@@ -23,7 +23,8 @@ sys.modules[spec.name] = oracle
 spec.loader.exec_module(oracle)
 
 
-def _write_dataset(root: Path, n: int = 8, glim_offset: float = 0.0):
+def _write_dataset(root: Path, n: int = 8, glim_offset: float = 0.0,
+                   dense: bool = False):
     times = np.arange(n, dtype=float) * .1
     times_file = root / 'times.txt'
     np.savetxt(times_file, times, fmt='%.9f')
@@ -49,6 +50,16 @@ def _write_dataset(root: Path, n: int = 8, glim_offset: float = 0.0):
     scan_dir.mkdir()
     world = np.array([[5., 0., 0.], [6., 2., 1.], [9., -2., -.5],
                       [12., 3., 2.], [15., -4., 0.], [18., 0., 1.]])
+    if dense:
+        # Three orthogonal planar patches; enough local geometry for the REAL
+        # normal-estimation, pairwise PGO and Joint solvers (not mocked).
+        u, v = np.meshgrid(np.linspace(5, 12, 17), np.linspace(-3, 3, 17))
+        a, b = np.meshgrid(np.linspace(-3, 3, 17), np.linspace(-1, 3, 17))
+        world = np.vstack((
+            np.column_stack((u.ravel(), v.ravel(), np.full(u.size, -1.0))),
+            np.column_stack((np.full(a.size, 6.0), a.ravel(), b.ravel())),
+            np.column_stack((u.ravel(), np.full(u.size, -3.0), b.ravel())),
+        ))
     for i in range(n):
         local = world - gt[i, :3, 3]
         np.column_stack((local, np.ones(len(local)))).astype('<f4').tofile(
@@ -137,3 +148,44 @@ def test_glim_pose_perturbation_exposed(tmp_path: Path):
     glim_rows = [r for r in rows if r['stage'] == 'glim']
     assert all(float(r['pose_trans_mean_m']) > 0 for r in glim_rows)
     assert all(float(r['paired_rmse_m']) > 0 for r in glim_rows)
+
+
+
+def test_cli_pgo_and_both_use_independent_glim_initialization(tmp_path: Path):
+    """PGO is a real solver call, and both stages share the same original GLIM cloud."""
+    times, odom, poses, calib, velodyne = _write_dataset(
+        tmp_path, glim_offset=.015, dense=True
+    )
+    out = tmp_path / 'pgo_results'
+    args = [
+        '--times', str(times), '--odom', str(odom), '--poses', str(poses),
+        '--calib', str(calib), '--velodyne', str(velodyne), '--out', str(out),
+        '--start-s', '0', '--stop-s', '0.7', '--target-frame', '3',
+        '--half-frames', '1', '--radii-m', '.7',
+        '--roi', '0', '22', '-6', '6', '-3', '4', '--voxel-m', '.5',
+        '--refiner', 'both', '--refine-iterations', '2',
+        '--refine-voxel-m', '.2', '--refine-max-samples', '1200',
+        '--pgo-iterations', '2', '--pgo-pair-max-nfev', '15',
+    ]
+    assert oracle.main(args) == 0
+    rows = list(csv.DictReader((out / 'summary.csv').open()))
+    plans = json.loads((out / 'manifest.json').read_text())['comparisons']
+    assert len(rows) == 4 * len(plans)  # oracle / glim / joint / pgo
+    for plan in plans:
+        name = plan['name']
+        group = {r['stage']: r for r in rows if r['experiment'] == name}
+        assert set(group) == {'oracle', 'glim', 'joint', 'pgo'}
+        anchor = plan['scan_frames'].index(3)
+        for method in ('joint', 'pgo'):
+            transforms = np.load(out / f'{name}_{method}_corrections.npy')
+            assert transforms.shape == (len(plan['scan_frames']), 4, 4)
+            np.testing.assert_allclose(transforms[anchor], np.eye(4), atol=1e-8)
+            diagnostics = json.loads(
+                (out / f'{name}_{method}_diagnostics.json').read_text()
+            )
+            assert diagnostics['initialization'] == 'independent_original_GLIM_accumulation'
+            assert diagnostics['iterations']
+            assert np.isfinite(float(group[method]['pose_trans_mean_m']))
+            assert np.isfinite(float(group[method]['paired_rmse_m']))
+        diag_pgo = json.loads((out / f'{name}_pgo_diagnostics.json').read_text())
+        assert diag_pgo['iterations'][0]['pair_edges'] >= 1
