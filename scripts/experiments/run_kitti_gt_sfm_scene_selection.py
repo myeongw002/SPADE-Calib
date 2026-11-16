@@ -66,7 +66,9 @@ def load_kitti_camera_gt(times_path: Path, poses_path: Path, calib_path: Path,
     if (not np.allclose(r @ np.swapaxes(r, 1, 2), np.eye(3), atol=2e-3) or
             not np.allclose(np.linalg.det(r), 1., atol=2e-3)):
         raise ValueError('KITTI GT contains nonrigid camera poses')
-    calib = parse_kitti_odom_calib(calib_path)
+    # Camera-only KITTI color releases may omit Tr (LiDAR extrinsic).
+    # GT camera-pose SfM needs only the rectified projection matrices.
+    calib = parse_kitti_odom_calib(calib_path, require_tr=False)
     p0 = calib['P0']
     key = f'P{camera_index}'
     if key not in calib:
