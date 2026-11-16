@@ -28,6 +28,7 @@ from typing import Any, Sequence
 
 import numpy as np
 from scipy.spatial.transform import Rotation
+from scipy.optimize import linear_sum_assignment
 
 from spade_calib.evaluation.kitti import parse_kitti_odom_calib
 from spade_calib.selection.sfm_planes import (
@@ -811,6 +812,60 @@ def evaluate_global(args: argparse.Namespace) -> int:
     LOG.info('Global SfM scoring finished: %d candidates, %d selected',
              len(rows), len(selected))
     return 0
+
+
+def _compare_plane_sets(
+    local_planes: list[dict[str, Any]],
+    global_planes: list[dict[str, Any]],
+    distance_threshold_m: float,
+    normal_threshold_deg: float = 15.,
+) -> dict[str, Any]:
+    """Match physical plane candidates, not merely parallel normal directions.
+
+    Normal orientation is sign-ambiguous. Cross-plane centroid distances reject
+    distant parallel walls. These are still heuristic matching gates, not
+    camera-LiDAR registration correspondences.
+    """
+    empty = {
+        'matched_plane_count': 0, 'plane_normal_angle_median_deg': None,
+        'plane_offset_median_m': None, 'plane_match_fraction_min_count': 0.,
+    }
+    if not local_planes or not global_planes:
+        return empty
+    cost = np.full((len(local_planes), len(global_planes)), 1e6)
+    errors: dict[tuple[int, int], tuple[float, float]] = {}
+    for i, a in enumerate(local_planes):
+        na = np.asarray(a['normal_world_xyz'], dtype=float)
+        ca = np.asarray(a['centroid_world_xyz'], dtype=float)
+        da = float(a['offset_m'])
+        for j, b in enumerate(global_planes):
+            nb = np.asarray(b['normal_world_xyz'], dtype=float)
+            cb = np.asarray(b['centroid_world_xyz'], dtype=float)
+            db = float(b['offset_m'])
+            normal_angle = math.degrees(math.acos(
+                float(np.clip(abs(na @ nb), -1., 1.))))
+            # Symmetric point-to-plane distances handle sign ambiguity.
+            plane_dist = .5 * (
+                abs(float(na @ cb + da)) + abs(float(nb @ ca + db))
+            )
+            if (normal_angle <= normal_threshold_deg and
+                    plane_dist <= distance_threshold_m):
+                cost[i, j] = normal_angle / normal_threshold_deg + (
+                    plane_dist / max(distance_threshold_m, 1e-9))
+                errors[(i, j)] = (normal_angle, plane_dist)
+    ii, jj = linear_sum_assignment(cost)
+    pairs = [errors[(int(i), int(j))]
+             for i, j in zip(ii, jj)
+             if (int(i), int(j)) in errors]
+    if not pairs:
+        return empty
+    return {
+        'matched_plane_count': len(pairs),
+        'plane_normal_angle_median_deg': float(np.median([p[0] for p in pairs])),
+        'plane_offset_median_m': float(np.median([p[1] for p in pairs])),
+        'plane_match_fraction_min_count':
+            len(pairs) / min(len(local_planes), len(global_planes)),
+    }
 
 
 def compare(args: argparse.Namespace) -> int:
