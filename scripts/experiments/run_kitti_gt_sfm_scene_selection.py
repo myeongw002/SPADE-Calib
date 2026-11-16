@@ -909,12 +909,30 @@ def compare(args: argparse.Namespace) -> int:
         return sorted(scores, key=lambda n: (
             not scores[n]['eligible'], -scores[n].get('selection_score', scores[n]['geometry_score_heuristic']),
             scores[n]['start_s'], n))
+    local_planes: dict[str, list[dict[str, Any]]] = {}
+    global_planes: dict[str, list[dict[str, Any]]] = {}
+    if local['config'].get('selection_metric') == 'plane':
+        for scope, destination in (('local', local_planes), ('global', global_planes)):
+            file = args.out / f'{scope}_plane_details.json'
+            doc = json.loads(file.read_text(encoding='utf-8'))
+            if doc.get('scope') != scope:
+                raise ValueError(f'{scope} plane report has mismatched model scope')
+            for record in doc['planes']:
+                if record['scene'] not in l:
+                    raise ValueError(f'Unexpected {scope} plane scene: {record["scene"]}')
+                destination.setdefault(record['scene'], []).append(record)
     lnames, gnames = order(l), order(g)
     lranks = {n: i + 1 for i, n in enumerate(lnames)}
     granks = {n: i + 1 for i, n in enumerate(gnames)}
     rows = []
     for name in sorted(l, key=lambda n: (l[n]['start_s'], n)):
         a, b = l[name], g[name]
+        normal_match = (
+            _compare_plane_sets(
+                local_planes.get(name, []), global_planes.get(name, []),
+                distance_threshold_m=2 * float(local['config']['plane_threshold_m']),
+            ) if local['config'].get('selection_metric') == 'plane' else {}
+        )
         rows.append({
             'scene': name, 'start_s': a['start_s'], 'stop_s': a['stop_s'],
             'image_count': a['image_count'],
@@ -934,6 +952,7 @@ def compare(args: argparse.Namespace) -> int:
             'local_plane_score': a.get('plane_score_heuristic'),
             'global_plane_score': b.get('plane_score_heuristic'),
             'global_plane_external_xyz_points': b.get('plane_external_xyz_point_count'),
+            **normal_match,
             'local_qualified_points': a['qualified_points'],
             'global_qualified_points': b['qualified_points'],
             'global_qualified_points_with_outside_obs':
