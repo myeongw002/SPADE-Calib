@@ -113,7 +113,7 @@ def test_camera2_metric_pose_and_preset_windows(tmp_path: Path):
     np.testing.assert_allclose(twc2[0, :3, 3], [.5, 0, 0], atol=1e-10)
     np.testing.assert_allclose(twc2[10, :3, 3], [1.5, 0, 0], atol=1e-10)
     np.testing.assert_allclose(k, [[100, 0, 64], [0, 100, 48], [0, 0, 1]])
-    with pytest.raises(ValueError, match='poses'):
+    with pytest.raises(ValueError, match='No P4'):
         sfm.load_kitti_camera_gt(seq / 'times.txt', poses, seq / 'calib.txt', 4)
 
 
