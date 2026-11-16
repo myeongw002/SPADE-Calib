@@ -313,6 +313,7 @@ def screen_window_planes(
             'plane_id': len(found),
             'normal_world_xyz': [float(v) for v in n],
             'offset_m': float(offset),
+            'centroid_world_xyz': xyz_all[supported].mean(axis=0).tolist(),
             'normal_information_weight': float(weight),
             'inlier_count': int(len(supported)),
             'connected_candidate_inliers': int(len(candidate)),
