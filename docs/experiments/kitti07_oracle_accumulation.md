@@ -72,3 +72,18 @@ Definitions:
     python -m pytest tests/test_oracle_accumulation.py -q
 
 Synthetic tests exercise coordinate composition, ROI voxel logic, equal scan budget and the CLI; they do not replace a real KITTI07 experiment.
+
+
+## Joint vs PGO from exactly the same GLIM scans
+
+To run both refiners independently on each selected scan set, replace --refiner none in the command above with:
+
+    --refiner both --refine-iterations 4 --pgo-iterations 4 --pgo-pair-max-nfev 38
+
+Or use --refiner pgo / --refiner joint for one solver. Default --refiner none keeps the original oracle + GLIM baseline. Both Joint and PGO receive the **same original, unrefined GLIM accumulation**; PGO is not initialized from a Joint result.
+
+PGO uses spade_calib.lidar.pgo_solver.solve_pgo, with a PGOSettings instance whose pairs use the same JointSettings sampling and correspondence thresholds as Joint. Crucially, d1_roi=False (KITTI07, NOT the D1-specific physical ROI). --refine-voxel-m and --refine-max-samples affect pair sampling for both solvers; --refine-iterations controls Joint optimization only; --pgo-iterations controls graph IRLS and --pgo-pair-max-nfev controls pairwise least-squares fitting.
+
+The summary.csv stage column becomes oracle, glim, joint, pgo for --refiner both. per_scan_pose_errors.csv also includes joint and pgo. Each scan strategy emits <strategy>_joint_corrections.npy, <strategy>_pgo_corrections.npy, and matching <strategy>_{joint,pgo}_diagnostics.json files. These correction matrices map points already in the GLIM target LiDAR frame into the refined target frame. For each scan, the evaluated raw LiDAR-to-target transform is T_refined = T_correction @ T_GLIM_relative; do not treat T_correction alone as a raw scan pose.
+
+The PGO implementation is the repository's pairwise point-to-plane + small-angle graph optimizer; it is not GLIM's internal back-end. Pairwise graph diagnostics are training residuals, not GT accuracy. The existing joint-vs-pgo tests are synthetic; perform real KITTI07 verification and check connected matching constraints before drawing conclusions.
