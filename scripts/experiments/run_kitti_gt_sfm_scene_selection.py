@@ -613,6 +613,97 @@ def _score_scene(base: Path, scene: dict[str, Any], args: argparse.Namespace, *,
     return row
 
 
+def _plane_config(args: argparse.Namespace) -> PlaneScreenSettings:
+    return PlaneScreenSettings(
+        threshold_m=args.plane_threshold_m,
+        min_inliers=args.plane_min_inliers,
+        max_planes=args.plane_max_planes,
+        max_points=args.plane_max_points,
+        ransac_iters=args.plane_ransac_iters,
+        neighbors=args.plane_neighbors,
+        connectivity_factor=args.plane_connectivity_factor,
+        min_width_ratio=args.plane_min_width_ratio,
+        min_visible_frames=args.plane_min_visible_frames,
+        min_image_observations=args.plane_min_image_observations,
+        min_hull_fraction=args.plane_min_hull_fraction,
+        min_grid_cells=args.plane_min_grid_cells,
+        normal_information_weight=args.plane_information_weight,
+        regularizer=args.plane_regularizer,
+        min_normal_rank=args.plane_min_normal_rank,
+        normal_rank_ratio=args.plane_normal_rank_ratio,
+        min_normal_eigen_fraction=args.plane_min_eigen_fraction,
+        min_planes=args.plane_min_planes,
+        exclude_ground=args.plane_exclude_ground,
+        ground_angle_deg=args.plane_ground_angle_deg,
+        weak_motion_guidance=args.plane_weak_motion_guidance,
+        seed=args.plane_seed,
+    )
+
+
+def _select_scene_rows(rows: list[dict[str, Any]],
+                       args: argparse.Namespace
+                       ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Rank individually, select nonoverlapping scenes by marginal normal gain.
+
+    Feature-only compatibility retains the old top-score method. Plane
+    selection uses a common WORLD-coordinate 3x3 normal surrogate; no
+    unobservable-direction claim is made about full 6DoF calibration.
+    """
+    ranked = sorted((r for r in rows if r['eligible']),
+                    key=lambda r: (-r['selection_score'], r['start_s'], r['name']))
+    if args.selection_metric != 'plane':
+        selected = []
+        for row in ranked:
+            if (len(selected) < args.max_scenes and
+                    all(row['stop_s'] <= prior['start_s'] or
+                        row['start_s'] >= prior['stop_s']
+                        for prior in selected)):
+                selected.append(row)
+        return ranked, selected
+
+    cumulative = np.zeros((3, 3), dtype=float)
+    selected = []
+    while len(selected) < args.max_scenes:
+        candidates = []
+        base_score = float(np.linalg.slogdet(
+            np.eye(3) + cumulative / args.plane_regularizer)[1])
+        for row in ranked:
+            if any(row['name'] == existing['name'] for existing in selected):
+                continue
+            if any(row['stop_s'] > existing['start_s'] and
+                   row['start_s'] < existing['stop_s'] for existing in selected):
+                continue
+            normal_info = np.asarray(row['plane_normal_information_world'],
+                                     dtype=float)
+            marginal = float(np.linalg.slogdet(
+                np.eye(3) + (cumulative + normal_info) /
+                args.plane_regularizer)[1] - base_score)
+            candidates.append((marginal, row, normal_info))
+        if not candidates:
+            break
+        gain, best, info = sorted(
+            candidates, key=lambda p: (-p[0], p[1]['start_s'], p[1]['name']))[0]
+        if gain <= 1e-10:
+            break
+        # Do not mutate candidate rows: reports store the original per-window
+        # rank and an explicit marginal gain of the greedy selected union.
+        selected.append({**best, 'marginal_normal_gain': gain,
+                         'selection_order': len(selected) + 1})
+        cumulative += info
+    return ranked, selected
+
+
+def _plane_details_file(out: Path, scope: str,
+                        records: list[dict[str, Any]]) -> None:
+    _write_json(out / f'{scope}_plane_details.json', {
+        'schema_version': 1, 'scope': scope,
+        'method': 'window-supported_local_neighbor_RANSAC',
+        'plane_count': len(records), 'planes': records,
+        'note': ('Window track filtering and plane refit are local; Global XYZ '
+                 'still uses outside-window information where available.'),
+    })
+
+
 def evaluate(args: argparse.Namespace) -> int:
     if (args.min_track < 2 or args.min_parallax_deg < 0 or
             args.max_reproj_px <= 0 or args.grid_x < 1 or args.grid_y < 1 or
