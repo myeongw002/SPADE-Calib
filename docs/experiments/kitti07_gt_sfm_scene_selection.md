@@ -98,3 +98,95 @@ Tests:
 
 Official COLMAP known-pose reconstruction guidance:
 https://colmap.github.io/faq.html#reconstruct-sparse-dense-model-from-known-camera-poses
+
+
+## Global SfM vs Local SfM: full KITTI07 scene-selection comparison
+
+Four NEW operations are available through the SAME experiment script. Keep the
+same prepared candidate manifest for both evaluations. A new output directory
+is recommended; never mix incompatible old experiments.
+
+1. Prepare a sequence-wide sliding-window candidate set with equal local frame budgets:
+
+       python scripts/experiments/run_kitti_gt_sfm_scene_selection.py prepare \
+         --sequence /media/myungw00/256GB_SSD/kitti/data_odometry_color/sequences/07 \
+         --poses /media/myungw00/256GB_SSD/kitti/data_odometry_poses/poses/07.txt \
+         --camera 2 --sliding --window-s 15 --stride-s 7.5 \
+         --max-images 60 --out results/kitti07_gt_sfm_compare
+
+   The candidate windows use at most 60 sampled camera frames each. The global
+   reconstruction deliberately uses **ALL KITTI07 camera frames**, not merely
+   the union of those candidate samples. Therefore this comparison is
+   information-imbalanced by design: it measures the effect of unrestricted
+   external temporal observations.
+
+2. Construct ONE fixed-pose global SfM reconstruction:
+
+       python scripts/experiments/run_kitti_gt_sfm_scene_selection.py reconstruct-global \
+         --out results/kitti07_gt_sfm_compare \
+         --colmap colmap --matcher sequential --sequential-overlap 15
+
+   The output is stored under global/ (image_list.txt, GT camera pose matrices,
+   model_gt/, database.db, sparse/, sparse_txt/, four COLMAP logs). All global
+   input images are checked against the KITTI timestamps and camera intrinsics.
+   Poses remain fixed. A pre-existing global directory is rejected to prevent
+   accidental reuse of stale databases or partial models.
+
+3. Score candidate windows from global 3D tracks:
+
+       python scripts/experiments/run_kitti_gt_sfm_scene_selection.py evaluate-global \
+         --out results/kitti07_gt_sfm_compare \
+         --min-track 3 --min-parallax-deg 1 --max-reproj-px 2 \
+         --min-qualified-points 100 --max-scenes 2
+
+   Uses **only the selected window images' observations** for track length,
+   parallax angle, reprojection error and 2D grid coverage, but the global 3D
+   point coordinates were triangulated from all-sequence observations.
+   Qualified points with observations OUTSIDE the candidate are separately
+   reported. This does **NOT** make it window-only triangulation.
+   Outputs: global_scene_scores.csv, global_scene_selection.json.
+
+4. Run local window reconstruction and evaluation on the SAME candidate windows:
+
+       python scripts/experiments/run_kitti_gt_sfm_scene_selection.py reconstruct \
+         --out results/kitti07_gt_sfm_compare \
+         --colmap colmap --matcher sequential --sequential-overlap 15
+
+       python scripts/experiments/run_kitti_gt_sfm_scene_selection.py evaluate \
+         --out results/kitti07_gt_sfm_compare \
+         --min-track 3 --min-parallax-deg 1 --max-reproj-px 2 \
+         --min-qualified-points 100 --max-scenes 2
+
+5. Compare rankings and top-K matches:
+
+       python scripts/experiments/run_kitti_gt_sfm_scene_selection.py compare \
+         --out results/kitti07_gt_sfm_compare --top-k 3
+
+   Outputs:
+   - scene_comparison.csv: candidate IDs, two score/rank columns, differences
+     in qualified points, reprojection errors, parallax and grid coverage,
+     plus global tracks with outside-window observations.
+   - scene_comparison.json: chosen nonoverlapping windows per strategy,
+     selected-set Jaccard, Top-K overlap, descriptive rank correlation and
+     warnings about global information leakage.
+
+The compare command refuses incompatible evaluation thresholds, image counts,
+candidate names and temporal windows. This prevents silently comparing two
+different experiments. If local reconstruction does not finish for all windows,
+reconstruct subsets with --only scene_ID ...; however evaluate and compare need
+a complete candidate set. Both reconstructions may be expensive, especially
+full-sequence COLMAP features and matching.
+
+### Interpretation and future controlled experiment
+
+The Global reconstruction has information from frames outside each candidate.
+A scene's good Global score therefore does **not** prove it independently
+supports well-conditioned triangulation. This implementation provides (A) Local
+SfM and (B) Global XYZ with in-window track filtering. It does NOT yet perform
+(C) new triangulation of Global-matched tracks using only in-window observations;
+that is a separate controlled baseline.
+
+The two earlier Window005/012 presets can be used to debug execution, but with
+max_scenes=2 both are selected if eligible. Use sliding candidates for
+meaningful selection-agreement analysis. None of these steps measures
+camera–LiDAR GT extrinsic calibration error.

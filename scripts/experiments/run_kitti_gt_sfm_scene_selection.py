@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """KITTI07 fixed-GT-pose COLMAP SfM and geometry-aware scene selection.
 
-Three separate stages:
-  prepare: define independent scene candidates and GT camera poses.
-  reconstruct: run COLMAP feature extraction/matching/point_triangulation
-               separately for EACH candidate (no pose estimation or BA).
-  evaluate: verify output poses stayed fixed and rank scene geometry quality.
+Stages:
+  prepare: define identical candidate windows and known GT camera poses.
+  reconstruct / evaluate: independent local-window COLMAP and ranking.
+  reconstruct-global / evaluate-global: full-sequence COLMAP once, score
+    tracked points in those SAME windows (global 3D coordinates may use
+    observations OUTSIDE each window).
+  compare: join rankings/scores using identical candidate IDs.
 
 Sparse points are triangulated estimates, NOT ground-truth 3D geometry.
 """
@@ -22,7 +24,7 @@ import struct
 import subprocess
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -246,54 +248,118 @@ def _scene_entries(out: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     return manifest, scenes
 
 
-def reconstruct(args: argparse.Namespace) -> int:
+def _validate_reconstruction_options(args: argparse.Namespace) -> None:
     if args.timeout_sec < 1 or args.sequential_overlap < 1:
         raise ValueError('Invalid COLMAP timeout/overlap')
     if shutil.which(args.colmap) is None and not Path(args.colmap).is_file():
         raise FileNotFoundError(f'COLMAP binary not found: {args.colmap}')
+
+
+def _reconstruct_fixed_model(base: Path, scene: dict[str, Any],
+                             image_dir: Path, args: argparse.Namespace) -> None:
+    """Common COLMAP runner. Each supplied model is constructed from fixed GT poses."""
+    db = base / 'database.db'
+    seed = base / 'model_gt'
+    sparse = base / 'sparse'
+    sparse_txt = base / 'sparse_txt'
+    if any(path.exists() for path in (db, seed, sparse, sparse_txt)):
+        raise FileExistsError(
+            f'{base}: COLMAP files exist. Use a fresh directory to avoid stale-model reuse.')
+    feature = [args.colmap, 'feature_extractor',
+               '--database_path', str(db), '--image_path', str(image_dir),
+               '--image_list_path', str(base / 'image_list.txt'),
+               '--ImageReader.single_camera', '1',
+               '--ImageReader.camera_model', 'PINHOLE',
+               '--ImageReader.camera_params',
+               ','.join(f'{x:.17g}' for x in scene['camera_params'])]
+    _run_colmap(feature, base / '01_feature.log', args.timeout_sec)
+    records = _db_images(db, scene['image_names'], scene['image_width'],
+                         scene['image_height'], scene['camera_params'])
+    _write_seed_model(base, scene, records)
+    if args.matcher == 'sequential':
+        matcher = [args.colmap, 'sequential_matcher', '--database_path', str(db),
+                   '--SequentialMatching.overlap', str(args.sequential_overlap)]
+    else:
+        matcher = [args.colmap, 'exhaustive_matcher', '--database_path', str(db)]
+    _run_colmap(matcher, base / '02_match.log', args.timeout_sec)
+    sparse.mkdir()
+    _run_colmap([args.colmap, 'point_triangulator',
+                 '--database_path', str(db), '--image_path', str(image_dir),
+                 '--input_path', str(seed), '--output_path', str(sparse)],
+                base / '03_triangulate.log', args.timeout_sec)
+    sparse_txt.mkdir()
+    _run_colmap([args.colmap, 'model_converter', '--input_path', str(sparse),
+                 '--output_path', str(sparse_txt), '--output_type', 'TXT'],
+                base / '04_convert.log', args.timeout_sec)
+    verify_fixed_poses(base, scene)
+
+
+def reconstruct(args: argparse.Namespace) -> int:
+    _validate_reconstruction_options(args)
     manifest, scenes = _scene_entries(args.out)
-    image_dir = Path(manifest['image_path'])
+    if args.only:
+        available = {s['name'] for s in scenes}
+        unknown = set(args.only) - available
+        if unknown:
+            raise ValueError(f'Unknown local scene IDs: {sorted(unknown)}')
     for scene in scenes:
-        name = scene['name']
-        if args.only and name not in args.only:
+        if args.only and scene['name'] not in args.only:
             continue
-        base = args.out / name
-        db = base / 'database.db'
-        seed = base / 'model_gt'
-        sparse = base / 'sparse'
-        sparse_txt = base / 'sparse_txt'
-        if db.exists() or seed.exists() or sparse.exists() or sparse_txt.exists():
-            raise FileExistsError(
-                f'{name}: COLMAP outputs already exist; use a fresh output folder '
-                'to prevent stale database/model reuse')
-        feature = [args.colmap, 'feature_extractor',
-                   '--database_path', str(db), '--image_path', str(image_dir),
-                   '--image_list_path', str(base / 'image_list.txt'),
-                   '--ImageReader.single_camera', '1',
-                   '--ImageReader.camera_model', 'PINHOLE',
-                   '--ImageReader.camera_params',
-                   ','.join(f'{x:.17g}' for x in scene['camera_params'])]
-        _run_colmap(feature, base / '01_feature.log', args.timeout_sec)
-        records = _db_images(db, scene['image_names'], scene['image_width'],
-                             scene['image_height'], scene['camera_params'])
-        _write_seed_model(base, scene, records)
-        if args.matcher == 'sequential':
-            matcher = [args.colmap, 'sequential_matcher', '--database_path', str(db),
-                       '--SequentialMatching.overlap', str(args.sequential_overlap)]
-        else:
-            matcher = [args.colmap, 'exhaustive_matcher', '--database_path', str(db)]
-        _run_colmap(matcher, base / '02_match.log', args.timeout_sec)
-        sparse.mkdir()
-        _run_colmap([args.colmap, 'point_triangulator',
-                     '--database_path', str(db), '--image_path', str(image_dir),
-                     '--input_path', str(seed), '--output_path', str(sparse)],
-                    base / '03_triangulate.log', args.timeout_sec)
-        sparse_txt.mkdir()
-        _run_colmap([args.colmap, 'model_converter', '--input_path', str(sparse),
-                     '--output_path', str(sparse_txt), '--output_type', 'TXT'],
-                    base / '04_convert.log', args.timeout_sec)
-        verify_fixed_poses(base, scene)
-        LOG.info('Completed fixed-pose triangulation: %s', name)
+        _reconstruct_fixed_model(args.out / scene['name'], scene,
+                                 Path(manifest['image_path']), args)
+        LOG.info('Completed fixed-pose local SfM: %s', scene['name'])
+    return 0
+
+
+def _make_global_scene(args: argparse.Namespace,
+                       manifest: dict[str, Any]) -> dict[str, Any]:
+    """Prepare *all* sequence camera frames; never use selected-window subsets."""
+    seq = Path(manifest['sequence'])
+    times, twc, intrinsics = load_kitti_camera_gt(
+        seq / 'times.txt', Path(manifest['poses_path']), seq / 'calib.txt',
+        int(manifest['camera_index']))
+    if len(times) != int(manifest['num_kitti_frames']):
+        raise ValueError('KITTI sequence changed since prepare: frame count mismatch')
+    image_dir = Path(manifest['image_path'])
+    names = [f'{frame:06d}.png' for frame in range(len(times))]
+    sizes = {read_png_size(image_dir / name) for name in names}
+    if len(sizes) != 1:
+        raise ValueError(f'Global SfM images have inconsistent dimensions: {sizes}')
+    width, height = sizes.pop()
+    params = [float(intrinsics[0, 0]), float(intrinsics[1, 1]),
+              float(intrinsics[0, 2]), float(intrinsics[1, 2])]
+    # Check every candidate uses exactly the same calibration and dimensions.
+    for window in manifest['scenes']:
+        local = json.loads((args.out / window['name'] / 'scene.json').read_text())
+        if (local['camera_params'] != params or
+                (local['image_width'], local['image_height']) != (width, height)):
+            raise ValueError(f'{window["name"]}: inconsistent local/global calibration')
+    base = args.out / 'global'
+    base.mkdir(exist_ok=False)
+    scene = {
+        'name': 'global', 'start_s': float(times[0]), 'stop_s': float(times[-1]),
+        'frames': list(range(len(times))), 'image_names': names,
+        'image_count': len(names), 'image_width': width, 'image_height': height,
+        'camera_model': 'PINHOLE', 'camera_params': params,
+        'pose_convention': f'T_world_rectified_camera_{manifest["camera_index"]}',
+        'scope': 'full_sequence_all_images_not_selected_windows',
+    }
+    np.save(base / 'gt_T_world_camera.npy', twc)
+    (base / 'image_list.txt').write_text('\n'.join(names) + '\n', encoding='utf-8')
+    _write_json(base / 'scene.json', scene)
+    return scene
+
+
+def reconstruct_global(args: argparse.Namespace) -> int:
+    """Triangulate exactly once using ALL available KITTI camera frames."""
+    _validate_reconstruction_options(args)
+    manifest, _ = _scene_entries(args.out)
+    if (args.out / 'global').exists():
+        raise FileExistsError(f'Global model already exists: {args.out / "global"}')
+    scene = _make_global_scene(args, manifest)
+    _reconstruct_fixed_model(args.out / 'global', scene,
+                             Path(manifest['image_path']), args)
+    LOG.info('Completed GT-fixed global SfM: %d images', scene['image_count'])
     return 0
 
 
@@ -391,17 +457,47 @@ def _iter_points(path: Path):
             yield point_id, xyz, pairs
 
 
-def _score_scene(base: Path, scene: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
-    images = verify_fixed_poses(base, scene)
+def _score_scene(base: Path, scene: dict[str, Any], args: argparse.Namespace, *,
+                 global_images: dict[int, dict[str, Any]] | None = None,
+                 source_model: Path | None = None) -> dict[str, Any]:
+    """Score only in-window feature observations.
+
+    With global_images, XYZ is triangulated from the FULL sequence even though
+    track support, parallax, reprojection and grid coverage use only observations
+    from this window. This is a deliberately global-information-assisted proxy.
+    """
+    if global_images is None:
+        images = verify_fixed_poses(base, scene)
+        is_global = False
+    else:
+        selected_names = set(scene['image_names'])
+        images = {i: record for i, record in global_images.items()
+                  if record['name'] in selected_names}
+        if len(images) != len(selected_names):
+            missing = selected_names - {r['name'] for r in images.values()}
+            raise ValueError(f"Global SfM missing window image poses: {sorted(missing)[:5]}")
+        is_global = True
     width, height = scene['image_width'], scene['image_height']
     fx, fy, cx, cy = scene['camera_params']
     mats = {i: _pose_matrix(r) for i, r in images.items()}
     centers = {i: -m[:3, :3].T @ m[:3, 3] for i, m in mats.items()}
     bins = {i: np.zeros((args.grid_y, args.grid_x), dtype=bool) for i in images}
     all_points = qualified = 0
+    external_tracks = external_qualified = 0
     lengths, parallax, reproj = [], [], []
-    for point_id, xyz, track in _iter_points(base / 'sparse_txt' / 'points3D.txt'):
+    points_path = (source_model if source_model is not None
+                   else base / 'sparse_txt' / 'points3D.txt')
+    for point_id, xyz, full_track in _iter_points(points_path):
+        track = [(image_id, point_index) for image_id, point_index in full_track
+                 if image_id in images]
+        if not is_global and len(track) != len(full_track):
+            raise ValueError(f'Local COLMAP point {point_id} references an unknown image')
+        if not track:
+            continue  # Global point never observed in this window.
         all_points += 1
+        observed_outside = len(track) < len(full_track)
+        if observed_outside:
+            external_tracks += 1
         if len(track) < args.min_track:
             continue
         ray_vectors = []
@@ -439,6 +535,8 @@ def _score_scene(base: Path, scene: dict[str, Any], args: argparse.Namespace) ->
         if angle < args.min_parallax_deg or pixel_error > args.max_reproj_px:
             continue
         qualified += 1
+        if observed_outside:
+            external_qualified += 1
         lengths.append(len(good_observations))
         parallax.append(angle)
         reproj.append(pixel_error)
@@ -459,6 +557,9 @@ def _score_scene(base: Path, scene: dict[str, Any], args: argparse.Namespace) ->
         'name': scene['name'], 'start_s': scene['start_s'], 'stop_s': scene['stop_s'],
         'image_count': n_images, 'triangulated_points': all_points,
         'qualified_points': qualified, 'qualified_fraction': qualified / max(all_points, 1),
+        'source_scope': 'global_xyz_window_observations' if is_global else 'local_xyz',
+        'points_with_external_observations': external_tracks,
+        'qualified_points_with_external_observations': external_qualified,
         'qualified_points_per_image': points_per_image,
         'median_track_length': float(np.median(lengths)) if lengths else 0.,
         'median_parallax_deg': median_parallax,
@@ -521,6 +622,152 @@ def evaluate(args: argparse.Namespace) -> int:
     return 0
 
 
+def evaluate_global(args: argparse.Namespace) -> int:
+    """Score only in-window tracks, using globally triangulated 3D positions."""
+    if (args.min_track < 2 or args.min_parallax_deg < 0 or
+            args.max_reproj_px <= 0 or args.grid_x < 1 or args.grid_y < 1 or
+            args.min_qualified_points < 1 or args.max_scenes < 1 or
+            not np.isfinite([args.min_parallax_deg, args.max_reproj_px]).all()):
+        raise ValueError('Invalid geometry quality constraints')
+    _, scenes = _scene_entries(args.out)
+    base = args.out / 'global'
+    meta_path = base / 'scene.json'
+    if not meta_path.is_file():
+        raise FileNotFoundError('Run reconstruct-global before evaluate-global')
+    global_scene = json.loads(meta_path.read_text(encoding='utf-8'))
+    if global_scene.get('scope') != 'full_sequence_all_images_not_selected_windows':
+        raise ValueError('Not a full-sequence known-pose global model')
+    images = verify_fixed_poses(base, global_scene)
+    points = base / 'sparse_txt' / 'points3D.txt'
+    if not points.is_file():
+        raise FileNotFoundError('Missing global points3D.txt')
+    rows = [_score_scene(base, scene, args, global_images=images, source_model=points)
+            for scene in scenes]
+    ranked = sorted((r for r in rows if r['eligible']),
+                    key=lambda r: (-r['geometry_score_heuristic'],
+                                   r['start_s'], r['name']))
+    selected = []
+    for row in ranked:
+        if (len(selected) < args.max_scenes and
+                all(row['stop_s'] <= x['start_s'] or row['start_s'] >= x['stop_s']
+                    for x in selected)):
+            selected.append(row)
+    with (args.out / 'global_scene_scores.csv').open(
+            'w', newline='', encoding='utf-8') as fh:
+        writer = csv.DictWriter(fh, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    _write_json(args.out / 'global_scene_selection.json', {
+        'schema_version': 1,
+        'kind': 'gt_fixed_camera_pose_global_sfm_window_geometry_selection',
+        'model_scope': 'all_KITTI_camera_frames',
+        'score_scope': 'global_xyz_with_in_window_feature_observations',
+        'config': {k: v for k, v in vars(args).items()
+                   if k != 'func' and not isinstance(v, Path)},
+        'scenes_ranked': ranked, 'scenes_selected': selected,
+        'scenes_selected_count': len(selected), 'all_candidates': rows,
+        'caveats': [
+            'Global XYZ was triangulated using outside-window observations.',
+            'Window-only parallax/reprojection checks do not remove XYZ data leakage.',
+            'Feature count and coverage depend on image texture, not just 3D geometry.',
+            'No calibration was run; scene scores are not extrinsic accuracy.',
+        ],
+    })
+    LOG.info('Global SfM scoring finished: %d candidates, %d selected',
+             len(rows), len(selected))
+    return 0
+
+
+def compare(args: argparse.Namespace) -> int:
+    """Join matched candidate windows and compare Local/Global geometry rankings."""
+    if args.top_k < 1:
+        raise ValueError('--top-k must be positive')
+    local = json.loads((args.out / 'scene_selection.json').read_text(encoding='utf-8'))
+    glob = json.loads((args.out / 'global_scene_selection.json').read_text(encoding='utf-8'))
+    if (local.get('kind') != 'gt_fixed_camera_pose_sparse_sfm_scene_selection'
+            or glob.get('kind') != 'gt_fixed_camera_pose_global_sfm_window_geometry_selection'):
+        raise ValueError('Expected independent Local and Global SfM evaluation reports')
+    for key in ('min_track', 'min_parallax_deg', 'max_reproj_px',
+                'grid_x', 'grid_y', 'min_qualified_points', 'max_scenes'):
+        if local['config'].get(key) != glob['config'].get(key):
+            raise ValueError(f'Local/Global settings differ in {key}; rerun with equal settings')
+    l = {row['name']: row for row in local['all_candidates']}
+    g = {row['name']: row for row in glob['all_candidates']}
+    if not l or set(l) != set(g):
+        raise ValueError('Local/Global reports have different candidate window IDs')
+    for name in l:
+        if any(l[name][key] != g[name][key]
+               for key in ('start_s', 'stop_s', 'image_count')):
+            raise ValueError(f'Window boundaries or image budgets differ: {name}')
+    def order(scores: dict[str, dict[str, Any]]) -> list[str]:
+        return sorted(scores, key=lambda n: (
+            not scores[n]['eligible'], -scores[n]['geometry_score_heuristic'],
+            scores[n]['start_s'], n))
+    lnames, gnames = order(l), order(g)
+    lranks = {n: i + 1 for i, n in enumerate(lnames)}
+    granks = {n: i + 1 for i, n in enumerate(gnames)}
+    rows = []
+    for name in sorted(l, key=lambda n: (l[n]['start_s'], n)):
+        a, b = l[name], g[name]
+        rows.append({
+            'scene': name, 'start_s': a['start_s'], 'stop_s': a['stop_s'],
+            'image_count': a['image_count'],
+            'local_rank': lranks[name], 'global_rank': granks[name],
+            'rank_shift_global_minus_local': granks[name] - lranks[name],
+            'local_eligible': a['eligible'], 'global_eligible': b['eligible'],
+            'local_score': a['geometry_score_heuristic'],
+            'global_score': b['geometry_score_heuristic'],
+            'local_qualified_points': a['qualified_points'],
+            'global_qualified_points': b['qualified_points'],
+            'global_qualified_points_with_outside_obs':
+                b['qualified_points_with_external_observations'],
+            'local_parallax_deg': a['median_parallax_deg'],
+            'global_parallax_deg': b['median_parallax_deg'],
+            'local_reprojection_px': a['median_reproj_error_px'],
+            'global_reprojection_px': b['median_reproj_error_px'],
+            'local_grid_coverage': a['mean_image_grid_coverage'],
+            'global_grid_coverage': b['mean_image_grid_coverage'],
+        })
+    with (args.out / 'scene_comparison.csv').open(
+            'w', newline='', encoding='utf-8') as fh:
+        writer = csv.DictWriter(fh, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    select_l = {r['name'] for r in local['scenes_selected']}
+    select_g = {r['name'] for r in glob['scenes_selected']}
+    k = min(args.top_k, len(lnames))
+    top_l, top_g = set(lnames[:k]), set(gnames[:k])
+    x = np.asarray([lranks[n] for n in l], dtype=float)
+    y = np.asarray([granks[n] for n in l], dtype=float)
+    correlation = float(np.corrcoef(x, y)[0, 1]) if len(l) > 1 else None
+    _write_json(args.out / 'scene_comparison.json', {
+        'schema_version': 1,
+        'kind': 'kitti_gt_sfm_local_vs_global_scene_comparison',
+        'candidate_count': len(l),
+        'local_selected': sorted(select_l), 'global_selected': sorted(select_g),
+        'selected_intersection': sorted(select_l & select_g),
+        'selected_jaccard': len(select_l & select_g) / max(len(select_l | select_g), 1),
+        'top_k': k, 'local_top_k': sorted(top_l), 'global_top_k': sorted(top_g),
+        'top_k_overlap': len(top_l & top_g) / k,
+        'rank_correlation_tie_broken': correlation,
+        'maximum_absolute_rank_shift': max(abs(r['rank_shift_global_minus_local'])
+                                           for r in rows),
+        'candidates': rows,
+        'caveats': [
+            'Global point positions use observations outside candidate windows.',
+            'Equal windows, frame counts and geometric thresholds do not equalize '
+            'feature matching / triangulation information.',
+            'Both methods share the same heuristic, not a calibration metric.',
+            'Two disjoint windows and max_scenes=2 trivially select both, regardless of ranks.',
+            'Tied scores are ordered deterministically by start time and ID.',
+        ],
+    })
+    LOG.info('Compared %d windows: selected Jaccard=%.3f, top-%d overlap=%.3f',
+             len(rows), len(select_l & select_g) / max(len(select_l | select_g), 1),
+             k, len(top_l & top_g) / k)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -553,16 +800,34 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument('--only', nargs='*', help='Subset of scene IDs')
     run.set_defaults(func=reconstruct)
 
-    eva = sub.add_parser('evaluate', help='Verify fixed GT pose and rank SfM geometry')
-    eva.add_argument('--out', type=Path, required=True)
-    eva.add_argument('--min-track', type=int, default=3)
-    eva.add_argument('--min-parallax-deg', type=float, default=1.0)
-    eva.add_argument('--max-reproj-px', type=float, default=2.0)
-    eva.add_argument('--grid-x', type=int, default=8)
-    eva.add_argument('--grid-y', type=int, default=6)
-    eva.add_argument('--min-qualified-points', type=int, default=100)
-    eva.add_argument('--max-scenes', type=int, default=2)
+    grun = sub.add_parser('reconstruct-global',
+                          help='Reconstruct all KITTI camera frames using fixed GT poses')
+    grun.add_argument('--out', type=Path, required=True)
+    grun.add_argument('--colmap', type=str, default='colmap')
+    grun.add_argument('--matcher', choices=['sequential', 'exhaustive'], default='sequential')
+    grun.add_argument('--sequential-overlap', type=int, default=15)
+    grun.add_argument('--timeout-sec', type=int, default=7200)
+    grun.set_defaults(func=reconstruct_global)
+
+    eva = sub.add_parser('evaluate', help='Rank independent local-window reconstructions')
+    gev = sub.add_parser('evaluate-global',
+                         help='Rank windows using one global reconstruction')
+    for cfg in (eva, gev):
+        cfg.add_argument('--out', type=Path, required=True)
+        cfg.add_argument('--min-track', type=int, default=3)
+        cfg.add_argument('--min-parallax-deg', type=float, default=1.0)
+        cfg.add_argument('--max-reproj-px', type=float, default=2.0)
+        cfg.add_argument('--grid-x', type=int, default=8)
+        cfg.add_argument('--grid-y', type=int, default=6)
+        cfg.add_argument('--min-qualified-points', type=int, default=100)
+        cfg.add_argument('--max-scenes', type=int, default=2)
     eva.set_defaults(func=evaluate)
+    gev.set_defaults(func=evaluate_global)
+
+    comp = sub.add_parser('compare', help='Compare Local and Global SfM rankings')
+    comp.add_argument('--out', type=Path, required=True)
+    comp.add_argument('--top-k', type=int, default=3)
+    comp.set_defaults(func=compare)
     return p
 
 

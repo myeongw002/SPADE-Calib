@@ -250,3 +250,80 @@ def test_camera_only_calib_requires_p0_and_requested_p2(tmp_path: Path):
     ) + '\n')
     with pytest.raises(ValueError, match='missing P0'):
         sfm.load_kitti_camera_gt(seq / 'times.txt', poses, calib_path, 2)
+
+
+
+def _populate_global_and_local(tmp_path: Path) -> Path:
+    out = prepare(tmp_path)
+    manifest, scenes = sfm._scene_entries(out)
+    args = sfm.build_parser().parse_args([
+        'reconstruct-global', '--out', str(out),
+    ])
+    global_scene = sfm._make_global_scene(args, manifest)
+    assert global_scene['image_count'] == manifest['num_kitti_frames'] == 31
+    assert len(global_scene['frames']) == 31
+    assert global_scene['frames'] == list(range(31))
+    np.testing.assert_allclose(
+        np.load(out / 'global' / 'gt_T_world_camera.npy')[0, :3, 3],
+        [.5, 0., 0.], atol=1e-10)
+    create_model(out / 'global', global_scene, 9)
+    for k, scene in enumerate(scenes):
+        create_model(out / scene['name'], scene, [9, 4, 2][k])
+    return out
+
+
+def test_global_sfm_scoring_tracks_are_restricted_to_window(tmp_path: Path):
+    out = _populate_global_and_local(tmp_path)
+    common = ['--out', str(out), '--min-qualified-points', '1',
+              '--min-parallax-deg', '.1', '--min-track', '3']
+    assert sfm.main(['evaluate', *common]) == 0
+    assert sfm.main(['evaluate-global', *common]) == 0
+    local = json.loads((out / 'scene_selection.json').read_text())
+    global_ = json.loads((out / 'global_scene_selection.json').read_text())
+    assert len(local['all_candidates']) == len(global_['all_candidates']) == 3
+    for row in global_['all_candidates']:
+        assert row['qualified_points'] == 9
+        assert row['image_count'] == 6
+        assert row['source_scope'] == 'global_xyz_window_observations'
+        assert row['qualified_points_with_external_observations'] == 9
+        # Global track has 31 observations but window track must contain only 6.
+        assert row['median_track_length'] == 6
+    assert [r['qualified_points'] for r in local['all_candidates']] == [9, 4, 2]
+    assert sfm.main(['compare', '--out', str(out), '--top-k', '2']) == 0
+    comparison = json.loads((out / 'scene_comparison.json').read_text())
+    assert comparison['candidate_count'] == 3
+    assert comparison['top_k'] == 2
+    assert len(comparison['candidates']) == 3
+    assert 0 <= comparison['selected_jaccard'] <= 1
+    with (out / 'scene_comparison.csv').open() as fh:
+        comparison_rows = list(csv.DictReader(fh))
+    assert {r['scene'] for r in comparison_rows} == {
+        'slide_000', 'slide_001', 'slide_002'
+    }
+
+
+def test_global_compare_rejects_mismatched_quality_settings(tmp_path: Path):
+    out = _populate_global_and_local(tmp_path)
+    opts = ['--out', str(out), '--min-qualified-points', '1',
+            '--min-parallax-deg', '.1']
+    assert sfm.main(['evaluate', *opts]) == 0
+    assert sfm.main(['evaluate-global', *opts, '--max-reproj-px', '1']) == 0
+    with pytest.raises(ValueError, match='max_reproj_px'):
+        sfm.main(['compare', '--out', str(out)])
+
+
+def test_global_prepare_does_not_reuse_local_frames(tmp_path: Path):
+    out = prepare(tmp_path)
+    manifest, _ = sfm._scene_entries(out)
+    args = sfm.build_parser().parse_args([
+        'reconstruct-global', '--out', str(out),
+    ])
+    scene = sfm._make_global_scene(args, manifest)
+    local_images = {
+        image for item in manifest['scenes']
+        for image in json.loads((out / item['name'] / 'scene.json').read_text())['image_names']
+    }
+    assert len(scene['image_names']) > len(local_images)
+    assert '000030.png' in scene['image_names']
+    with pytest.raises(FileExistsError):
+        sfm._make_global_scene(args, manifest)
