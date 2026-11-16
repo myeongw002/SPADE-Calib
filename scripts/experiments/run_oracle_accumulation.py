@@ -20,7 +20,9 @@ from scipy.spatial.transform import Rotation
 
 from spade_calib.evaluation.kitti import kitti_gt_camera_lidar
 from spade_calib.io.kitti_bin import load_kitti_bin_scan
-from spade_calib.lidar import GlimTrajectory, JointSettings, accumulate_glim, solve_joint
+from spade_calib.lidar import (
+    GlimTrajectory, JointSettings, PGOSettings, accumulate_glim, solve_joint, solve_pgo,
+)
 
 # Reuse precisely the same scan selection and row-index mapping as the pilot.
 from run_accumulation_experiment import (  # noqa: E402
@@ -213,10 +215,15 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument('--match-scan-budget', action='store_true')
     p.add_argument('--selection-source', choices=['glim', 'gt'], default='glim',
                    help='Fixed radius uses which trajectory? Keep glim for real-policy baseline')
-    p.add_argument('--refiner', choices=['none', 'joint'], default='none')
+    p.add_argument('--refiner', choices=['none', 'joint', 'pgo', 'both'], default='none',
+                   help='Run independent solvers on identical GLIM-accumulated scans')
     p.add_argument('--refine-iterations', type=int, default=4)
     p.add_argument('--refine-voxel-m', type=float, default=.16)
     p.add_argument('--refine-max-samples', type=int, default=2500)
+    p.add_argument('--pgo-iterations', type=int, default=4,
+                   help='PGO graph IRLS iterations (not Joint iterations)')
+    p.add_argument('--pgo-pair-max-nfev', type=int, default=38,
+                   help='Max evaluations in each PGO pairwise least-squares fit')
     p.add_argument('--seed', type=int, default=20261116)
     p.add_argument('--min-range-m', type=float, default=1.0)
     p.add_argument('--max-range-m', type=float, default=70.0)
@@ -240,6 +247,10 @@ def main(argv: list[str] | None = None) -> int:
     if not (0 <= args.min_range_m < args.max_range_m and
             np.isfinite([args.min_range_m, args.max_range_m]).all()):
         raise ValueError('Invalid LiDAR range')
+    if (args.refine_iterations < 1 or args.refine_voxel_m <= 0 or
+            args.refine_max_samples < 24 or args.pgo_iterations < 1 or
+            args.pgo_pair_max_nfev < 1):
+        raise ValueError('Invalid Joint/PGO refinement settings')
     if not args.velodyne.is_dir():
         raise ValueError(f'No Velodyne directory: {args.velodyne}')
     times, glim, mapping = load_kitti_glim(args.times, args.odom, args.pose_index_offset)
@@ -280,16 +291,42 @@ def main(argv: list[str] | None = None) -> int:
         if len(raw.xyz) != len(oracle_xyz):
             raise RuntimeError('LiDAR return count changed during accumulation')
         models = [('oracle', oracle_xyz, gt_rel), ('glim', raw.xyz, glim_rel)]
-        if args.refiner == 'joint':
-            result = solve_joint(raw, JointSettings(anchor_scan_id=anchor, d1_roi=False,
-                                                   iterations=args.refine_iterations,
-                                                   voxel_m=args.refine_voxel_m,
-                                                   max_samples_per_scan=args.refine_max_samples,
-                                                   seed=args.seed))
-            # In solve_joint: p_refined = result.transforms[s] @ p_GLIM.
-            joint_rel = result.transforms @ glim_rel
-            models.append(('joint', result.xyz, joint_rel))
-            np.save(args.out / f'{plan.name}_joint_corrections.npy', result.transforms)
+        methods = (['joint', 'pgo'] if args.refiner == 'both'
+                   else [] if args.refiner == 'none' else [args.refiner])
+        # Joint and PGO MUST start from the same unrefined GLIM cloud.
+        # Neither solver is initialized using the other solver's output.
+        for method in methods:
+            pair_cfg = JointSettings(anchor_scan_id=anchor, d1_roi=False,
+                                     iterations=args.refine_iterations,
+                                     voxel_m=args.refine_voxel_m,
+                                     max_samples_per_scan=args.refine_max_samples,
+                                     seed=args.seed)
+            if method == 'joint':
+                result = solve_joint(raw, settings=pair_cfg)
+                solver = 'spade_calib.lidar.joint_solver.solve_joint'
+            else:
+                pgo_cfg = PGOSettings(pairs=pair_cfg, iterations=args.pgo_iterations,
+                                      pair_max_nfev=args.pgo_pair_max_nfev)
+                result = solve_pgo(raw, settings=pgo_cfg)
+                solver = 'spade_calib.lidar.pgo_solver.solve_pgo'
+            if (result.anchor_scan_id != anchor or
+                    result.transforms.shape != (len(frames), 4, 4) or
+                    result.xyz.shape != raw.xyz.shape or
+                    not np.isfinite(result.transforms).all() or
+                    not np.allclose(result.transforms[anchor], np.eye(4), atol=1e-8)):
+                raise RuntimeError(f'{method} produced inconsistent scan corrections')
+            # Both solvers return T_target_new_target_GLIM per scan.
+            # Do not interpret result.transforms as the raw LiDAR pose.
+            refined_rel = result.transforms @ glim_rel
+            models.append((method, result.xyz, refined_rel))
+            np.save(args.out / f'{plan.name}_{method}_corrections.npy', result.transforms)
+            (args.out / f'{plan.name}_{method}_diagnostics.json').write_text(
+                json.dumps({'solver': solver, 'selected_frames': list(plan.selected),
+                            'anchor_local_scan_id': anchor,
+                            'iterations': list(result.iterations),
+                            'initialization': 'independent_original_GLIM_accumulation',
+                            'note': 'Pair residuals are training diagnostics, not GT accuracy'},
+                           indent=2, allow_nan=False), encoding='utf-8')
         for stage, xyz, transforms in models:
             keys = voxel_keys(xyz, roi, args.voxel_m)
             row = {'experiment': plan.name, 'selection': plan.method,
