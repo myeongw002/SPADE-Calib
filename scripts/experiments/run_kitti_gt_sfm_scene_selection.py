@@ -28,8 +28,13 @@ from typing import Any, Sequence
 
 import numpy as np
 from scipy.spatial.transform import Rotation
+from scipy.optimize import linear_sum_assignment
 
 from spade_calib.evaluation.kitti import parse_kitti_odom_calib
+from spade_calib.selection.sfm_planes import (
+    ImageGeometry, PlaneObservation, PlanePoint, PlaneScreenSettings,
+    screen_window_planes,
+)
 
 LOG = logging.getLogger('kitti_gt_sfm_scenes')
 PRESET_WINDOWS = {'005': (37.5, 52.5), '012': (90.0, 105.0)}
@@ -459,7 +464,8 @@ def _iter_points(path: Path):
 
 def _score_scene(base: Path, scene: dict[str, Any], args: argparse.Namespace, *,
                  global_images: dict[int, dict[str, Any]] | None = None,
-                 source_model: Path | None = None) -> dict[str, Any]:
+                 source_model: Path | None = None,
+                 plane_records: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """Score only in-window feature observations.
 
     With global_images, XYZ is triangulated from the FULL sequence even though
@@ -485,6 +491,7 @@ def _score_scene(base: Path, scene: dict[str, Any], args: argparse.Namespace, *,
     all_points = qualified = 0
     external_tracks = external_qualified = 0
     lengths, parallax, reproj = [], [], []
+    window_points: list[PlanePoint] = []
     points_path = (source_model if source_model is not None
                    else base / 'sparse_txt' / 'points3D.txt')
     for point_id, xyz, full_track in _iter_points(points_path):
@@ -537,6 +544,17 @@ def _score_scene(base: Path, scene: dict[str, Any], args: argparse.Namespace, *,
         qualified += 1
         if observed_outside:
             external_qualified += 1
+        if args.selection_metric == 'plane':
+            window_points.append(PlanePoint(
+                xyz=xyz.copy(),
+                observations=tuple(
+                    PlaneObservation(int(img_id), float(xy[0]), float(xy[1]))
+                    for img_id, xy in good_observations
+                    if 0 <= xy[0] < width and 0 <= xy[1] < height
+                ),
+                reprojection_px=pixel_error, parallax_deg=angle,
+                has_outside_observations=observed_outside,
+            ))
         lengths.append(len(good_observations))
         parallax.append(angle)
         reproj.append(pixel_error)
@@ -553,7 +571,7 @@ def _score_scene(base: Path, scene: dict[str, Any], args: argparse.Namespace, *,
     # Heuristic ranking, NOT Fisher information or calibrated extrinsic utility.
     score = (float(np.log1p(points_per_image) * np.log1p(median_parallax)
                    * mean_grid / (1. + median_error)) if qualified else 0.)
-    return {
+    row = {
         'name': scene['name'], 'start_s': scene['start_s'], 'stop_s': scene['stop_s'],
         'image_count': n_images, 'triangulated_points': all_points,
         'qualified_points': qualified, 'qualified_fraction': qualified / max(all_points, 1),
@@ -568,8 +586,126 @@ def _score_scene(base: Path, scene: dict[str, Any], args: argparse.Namespace, *,
         'reproj_p95_px': float(np.percentile(reproj, 95)) if reproj else 0.,
         'mean_image_grid_coverage': mean_grid,
         'geometry_score_heuristic': score,
-        'eligible': qualified >= args.min_qualified_points,
+        'feature_eligible': qualified >= args.min_qualified_points,
     }
+    if args.selection_metric == 'plane':
+        plane_cfg = _plane_config(args)
+        # Explicit chronological order matters for optional motion guidance.
+        image_by_name = {record['name']: i for i, record in images.items()}
+        plane_images = {
+            image_by_name[name]: ImageGeometry(
+                width=width, height=height,
+                R_cw=mats[image_by_name[name]][:3, :3].copy()
+            ) for name in scene['image_names']
+        }
+        plane_stats, planes = screen_window_planes(
+            window_points, plane_images, plane_cfg,
+            globally_triangulated=is_global,
+        )
+        row.update(plane_stats)
+        row['eligible'] = bool(
+            row['feature_eligible']
+            and plane_stats['plane_translation_normal_proxy_sufficient']
+        )
+        row['selection_score'] = float(plane_stats['plane_score_heuristic'])
+        if plane_records is not None:
+            for plane in planes:
+                plane_records.append({'scene': scene['name'], **plane})
+    else:
+        row['eligible'] = row['feature_eligible']
+        row['selection_score'] = score
+    return row
+
+
+def _plane_config(args: argparse.Namespace) -> PlaneScreenSettings:
+    return PlaneScreenSettings(
+        threshold_m=args.plane_threshold_m,
+        min_inliers=args.plane_min_inliers,
+        max_planes=args.plane_max_planes,
+        max_points=args.plane_max_points,
+        ransac_iters=args.plane_ransac_iters,
+        neighbors=args.plane_neighbors,
+        connectivity_factor=args.plane_connectivity_factor,
+        min_width_ratio=args.plane_min_width_ratio,
+        min_visible_frames=args.plane_min_visible_frames,
+        min_image_observations=args.plane_min_image_observations,
+        min_hull_fraction=args.plane_min_hull_fraction,
+        min_grid_cells=args.plane_min_grid_cells,
+        normal_information_weight=args.plane_information_weight,
+        regularizer=args.plane_regularizer,
+        min_normal_rank=args.plane_min_normal_rank,
+        normal_rank_ratio=args.plane_normal_rank_ratio,
+        min_normal_eigen_fraction=args.plane_min_eigen_fraction,
+        min_planes=args.plane_min_planes,
+        exclude_ground=args.plane_exclude_ground,
+        ground_angle_deg=args.plane_ground_angle_deg,
+        weak_motion_guidance=args.plane_weak_motion_guidance,
+        seed=args.plane_seed,
+    )
+
+
+def _select_scene_rows(rows: list[dict[str, Any]],
+                       args: argparse.Namespace
+                       ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Rank individually, select nonoverlapping scenes by marginal normal gain.
+
+    Feature-only compatibility retains the old top-score method. Plane
+    selection uses a common WORLD-coordinate 3x3 normal surrogate; no
+    unobservable-direction claim is made about full 6DoF calibration.
+    """
+    ranked = sorted((r for r in rows if r['eligible']),
+                    key=lambda r: (-r['selection_score'], r['start_s'], r['name']))
+    if args.selection_metric != 'plane':
+        selected = []
+        for row in ranked:
+            if (len(selected) < args.max_scenes and
+                    all(row['stop_s'] <= prior['start_s'] or
+                        row['start_s'] >= prior['stop_s']
+                        for prior in selected)):
+                selected.append(row)
+        return ranked, selected
+
+    cumulative = np.zeros((3, 3), dtype=float)
+    selected = []
+    while len(selected) < args.max_scenes:
+        candidates = []
+        base_score = float(np.linalg.slogdet(
+            np.eye(3) + cumulative / args.plane_regularizer)[1])
+        for row in ranked:
+            if any(row['name'] == existing['name'] for existing in selected):
+                continue
+            if any(row['stop_s'] > existing['start_s'] and
+                   row['start_s'] < existing['stop_s'] for existing in selected):
+                continue
+            normal_info = np.asarray(row['plane_normal_information_world'],
+                                     dtype=float)
+            marginal = float(np.linalg.slogdet(
+                np.eye(3) + (cumulative + normal_info) /
+                args.plane_regularizer)[1] - base_score)
+            candidates.append((marginal, row, normal_info))
+        if not candidates:
+            break
+        gain, best, info = sorted(
+            candidates, key=lambda p: (-p[0], p[1]['start_s'], p[1]['name']))[0]
+        if gain <= 1e-10:
+            break
+        # Do not mutate candidate rows: reports store the original per-window
+        # rank and an explicit marginal gain of the greedy selected union.
+        selected.append({**best, 'marginal_normal_gain': gain,
+                         'selection_order': len(selected) + 1})
+        cumulative += info
+    return ranked, selected
+
+
+def _plane_details_file(out: Path, scope: str,
+                        records: list[dict[str, Any]]) -> None:
+    _write_json(out / f'{scope}_plane_details.json', {
+        'schema_version': 1, 'scope': scope,
+        'method': 'window-supported_local_neighbor_RANSAC',
+        'plane_count': len(records), 'planes': records,
+        'note': ('Window track filtering and plane refit are local; Global XYZ '
+                 'still uses outside-window information where available.'),
+    })
 
 
 def evaluate(args: argparse.Namespace) -> int:
@@ -579,24 +715,19 @@ def evaluate(args: argparse.Namespace) -> int:
         raise ValueError('Invalid geometry quality constraints')
     _, scenes = _scene_entries(args.out)
     rows = []
+    plane_records: list[dict[str, Any]] = []
     for scene in scenes:
         base = args.out / scene['name']
         if not (base / 'sparse_txt' / 'points3D.txt').is_file():
             raise FileNotFoundError(f"Run reconstruct for scene {scene['name']} first")
-        row = _score_scene(base, scene, args)
+        row = _score_scene(base, scene, args, plane_records=plane_records)
         rows.append(row)
-        LOG.info('%s: qualified=%d (%.1f/frame), median parallax=%.2f°, grid=%.3f',
-                 row['name'], row['qualified_points'],
-                 row['qualified_points_per_image'], row['median_parallax_deg'],
-                 row['mean_image_grid_coverage'])
-    ranked = sorted([x for x in rows if x['eligible']],
-                    key=lambda x: (-x['geometry_score_heuristic'], x['start_s'], x['name']))
-    selected = []
-    for row in ranked:
-        if (len(selected) < args.max_scenes and all(
-                row['stop_s'] <= s['start_s'] or row['start_s'] >= s['stop_s']
-                for s in selected)):
-            selected.append(row)
+        LOG.info('%s: qualified=%d, planes=%s, normal_rank=%s, eligible=%s, score=%.4f',
+                 row['name'], row['qualified_points'], row.get('plane_count'),
+                 row.get('plane_normal_rank'), row['eligible'], row['selection_score'])
+    ranked, selected = _select_scene_rows(rows, args)
+    if args.selection_metric == 'plane':
+        _plane_details_file(args.out, 'local', plane_records)
     fields = list(rows[0])
     with (args.out / 'scene_scores.csv').open('w', newline='', encoding='utf-8') as fh:
         writer = csv.DictWriter(fh, fieldnames=fields)
@@ -608,13 +739,17 @@ def evaluate(args: argparse.Namespace) -> int:
                    if k not in ('func',) and not isinstance(v, Path)},
         'scenes_ranked': ranked, 'scenes_selected': selected, 'all_candidates': rows,
         'scenes_selected_count': len(selected),
-        'selection_basis': 'heuristic_sparse_feature_track_geometry_not_calibration_accuracy',
+        'selection_basis': ('heuristic_window_supported_plane_normal_diversity'
+                            if args.selection_metric == 'plane'
+                            else 'heuristic_sparse_feature_track_geometry_not_calibration_accuracy'),
         'caveats': [
             'KITTI camera poses are GT reference; triangulated points are not GT.',
             'Only independently reconstructed scene tracks contribute: no cross-window tracks.',
             'Point abundance is influenced by scene texture/lighting, not just geometry.',
             'Track parallax and reprojection error do not measure LiDAR-camera calibration utility.',
             'Windows are ranked by an explicit non-probabilistic heuristic score.',
+            'Plane rank and normal logdet constrain translation-normal diversity only, not 6DoF extrinsics.',
+            'Plane sufficiency thresholds are heuristic and must be checked by GT extrinsic evaluation.',
             'Unverified KITTI camera/LiDAR synchronization and dynamic objects remain limitations.',
         ],
     }
@@ -641,17 +776,13 @@ def evaluate_global(args: argparse.Namespace) -> int:
     points = base / 'sparse_txt' / 'points3D.txt'
     if not points.is_file():
         raise FileNotFoundError('Missing global points3D.txt')
-    rows = [_score_scene(base, scene, args, global_images=images, source_model=points)
+    plane_records: list[dict[str, Any]] = []
+    rows = [_score_scene(base, scene, args, global_images=images,
+                         source_model=points, plane_records=plane_records)
             for scene in scenes]
-    ranked = sorted((r for r in rows if r['eligible']),
-                    key=lambda r: (-r['geometry_score_heuristic'],
-                                   r['start_s'], r['name']))
-    selected = []
-    for row in ranked:
-        if (len(selected) < args.max_scenes and
-                all(row['stop_s'] <= x['start_s'] or row['start_s'] >= x['stop_s']
-                    for x in selected)):
-            selected.append(row)
+    ranked, selected = _select_scene_rows(rows, args)
+    if args.selection_metric == 'plane':
+        _plane_details_file(args.out, 'global', plane_records)
     with (args.out / 'global_scene_scores.csv').open(
             'w', newline='', encoding='utf-8') as fh:
         writer = csv.DictWriter(fh, fieldnames=list(rows[0]))
@@ -662,6 +793,9 @@ def evaluate_global(args: argparse.Namespace) -> int:
         'kind': 'gt_fixed_camera_pose_global_sfm_window_geometry_selection',
         'model_scope': 'all_KITTI_camera_frames',
         'score_scope': 'global_xyz_with_in_window_feature_observations',
+        'selection_basis': ('heuristic_window_supported_plane_normal_diversity'
+                            if args.selection_metric == 'plane'
+                            else 'heuristic_sparse_feature_track_geometry'),
         'config': {k: v for k, v in vars(args).items()
                    if k != 'func' and not isinstance(v, Path)},
         'scenes_ranked': ranked, 'scenes_selected': selected,
@@ -671,11 +805,67 @@ def evaluate_global(args: argparse.Namespace) -> int:
             'Window-only parallax/reprojection checks do not remove XYZ data leakage.',
             'Feature count and coverage depend on image texture, not just 3D geometry.',
             'No calibration was run; scene scores are not extrinsic accuracy.',
+            'Window-local plane fitting uses global XYZ; do NOT confuse with local retriangulation.',
+            'Normal information is a translation-only proxy, not full calibration observability.',
         ],
     })
     LOG.info('Global SfM scoring finished: %d candidates, %d selected',
              len(rows), len(selected))
     return 0
+
+
+def _compare_plane_sets(
+    local_planes: list[dict[str, Any]],
+    global_planes: list[dict[str, Any]],
+    distance_threshold_m: float,
+    normal_threshold_deg: float = 15.,
+) -> dict[str, Any]:
+    """Match physical plane candidates, not merely parallel normal directions.
+
+    Normal orientation is sign-ambiguous. Cross-plane centroid distances reject
+    distant parallel walls. These are still heuristic matching gates, not
+    camera-LiDAR registration correspondences.
+    """
+    empty = {
+        'matched_plane_count': 0, 'plane_normal_angle_median_deg': None,
+        'plane_offset_median_m': None, 'plane_match_fraction_min_count': 0.,
+    }
+    if not local_planes or not global_planes:
+        return empty
+    cost = np.full((len(local_planes), len(global_planes)), 1e6)
+    errors: dict[tuple[int, int], tuple[float, float]] = {}
+    for i, a in enumerate(local_planes):
+        na = np.asarray(a['normal_world_xyz'], dtype=float)
+        ca = np.asarray(a['centroid_world_xyz'], dtype=float)
+        da = float(a['offset_m'])
+        for j, b in enumerate(global_planes):
+            nb = np.asarray(b['normal_world_xyz'], dtype=float)
+            cb = np.asarray(b['centroid_world_xyz'], dtype=float)
+            db = float(b['offset_m'])
+            normal_angle = math.degrees(math.acos(
+                float(np.clip(abs(na @ nb), -1., 1.))))
+            # Symmetric point-to-plane distances handle sign ambiguity.
+            plane_dist = .5 * (
+                abs(float(na @ cb + da)) + abs(float(nb @ ca + db))
+            )
+            if (normal_angle <= normal_threshold_deg and
+                    plane_dist <= distance_threshold_m):
+                cost[i, j] = normal_angle / normal_threshold_deg + (
+                    plane_dist / max(distance_threshold_m, 1e-9))
+                errors[(i, j)] = (normal_angle, plane_dist)
+    ii, jj = linear_sum_assignment(cost)
+    pairs = [errors[(int(i), int(j))]
+             for i, j in zip(ii, jj)
+             if (int(i), int(j)) in errors]
+    if not pairs:
+        return empty
+    return {
+        'matched_plane_count': len(pairs),
+        'plane_normal_angle_median_deg': float(np.median([p[0] for p in pairs])),
+        'plane_offset_median_m': float(np.median([p[1] for p in pairs])),
+        'plane_match_fraction_min_count':
+            len(pairs) / min(len(local_planes), len(global_planes)),
+    }
 
 
 def compare(args: argparse.Namespace) -> int:
@@ -687,8 +877,24 @@ def compare(args: argparse.Namespace) -> int:
     if (local.get('kind') != 'gt_fixed_camera_pose_sparse_sfm_scene_selection'
             or glob.get('kind') != 'gt_fixed_camera_pose_global_sfm_window_geometry_selection'):
         raise ValueError('Expected independent Local and Global SfM evaluation reports')
-    for key in ('min_track', 'min_parallax_deg', 'max_reproj_px',
-                'grid_x', 'grid_y', 'min_qualified_points', 'max_scenes'):
+    equal_settings = [
+        'min_track', 'min_parallax_deg', 'max_reproj_px', 'grid_x',
+        'grid_y', 'min_qualified_points', 'max_scenes', 'selection_metric',
+    ]
+    if local['config'].get('selection_metric') == 'plane':
+        equal_settings += [
+            'plane_threshold_m', 'plane_min_inliers', 'plane_max_planes',
+            'plane_max_points', 'plane_ransac_iters', 'plane_neighbors',
+            'plane_connectivity_factor', 'plane_min_width_ratio',
+            'plane_min_visible_frames', 'plane_min_image_observations',
+            'plane_min_hull_fraction', 'plane_min_grid_cells',
+            'plane_information_weight', 'plane_regularizer',
+            'plane_min_normal_rank', 'plane_normal_rank_ratio',
+            'plane_min_eigen_fraction', 'plane_min_planes',
+            'plane_exclude_ground', 'plane_ground_angle_deg',
+            'plane_weak_motion_guidance', 'plane_seed',
+        ]
+    for key in equal_settings:
         if local['config'].get(key) != glob['config'].get(key):
             raise ValueError(f'Local/Global settings differ in {key}; rerun with equal settings')
     l = {row['name']: row for row in local['all_candidates']}
@@ -701,22 +907,52 @@ def compare(args: argparse.Namespace) -> int:
             raise ValueError(f'Window boundaries or image budgets differ: {name}')
     def order(scores: dict[str, dict[str, Any]]) -> list[str]:
         return sorted(scores, key=lambda n: (
-            not scores[n]['eligible'], -scores[n]['geometry_score_heuristic'],
+            not scores[n]['eligible'], -scores[n].get('selection_score', scores[n]['geometry_score_heuristic']),
             scores[n]['start_s'], n))
+    local_planes: dict[str, list[dict[str, Any]]] = {}
+    global_planes: dict[str, list[dict[str, Any]]] = {}
+    if local['config'].get('selection_metric') == 'plane':
+        for scope, destination in (('local', local_planes), ('global', global_planes)):
+            file = args.out / f'{scope}_plane_details.json'
+            doc = json.loads(file.read_text(encoding='utf-8'))
+            if doc.get('scope') != scope:
+                raise ValueError(f'{scope} plane report has mismatched model scope')
+            for record in doc['planes']:
+                if record['scene'] not in l:
+                    raise ValueError(f'Unexpected {scope} plane scene: {record["scene"]}')
+                destination.setdefault(record['scene'], []).append(record)
     lnames, gnames = order(l), order(g)
     lranks = {n: i + 1 for i, n in enumerate(lnames)}
     granks = {n: i + 1 for i, n in enumerate(gnames)}
     rows = []
     for name in sorted(l, key=lambda n: (l[n]['start_s'], n)):
         a, b = l[name], g[name]
+        normal_match = (
+            _compare_plane_sets(
+                local_planes.get(name, []), global_planes.get(name, []),
+                distance_threshold_m=2 * float(local['config']['plane_threshold_m']),
+            ) if local['config'].get('selection_metric') == 'plane' else {}
+        )
         rows.append({
             'scene': name, 'start_s': a['start_s'], 'stop_s': a['stop_s'],
             'image_count': a['image_count'],
             'local_rank': lranks[name], 'global_rank': granks[name],
             'rank_shift_global_minus_local': granks[name] - lranks[name],
             'local_eligible': a['eligible'], 'global_eligible': b['eligible'],
-            'local_score': a['geometry_score_heuristic'],
-            'global_score': b['geometry_score_heuristic'],
+            'local_score': a.get('selection_score', a['geometry_score_heuristic']),
+            'global_score': b.get('selection_score', b['geometry_score_heuristic']),
+            'local_feature_score': a['geometry_score_heuristic'],
+            'global_feature_score': b['geometry_score_heuristic'],
+            'local_plane_count': a.get('plane_count'),
+            'global_plane_count': b.get('plane_count'),
+            'local_plane_normal_rank': a.get('plane_normal_rank'),
+            'global_plane_normal_rank': b.get('plane_normal_rank'),
+            'local_plane_sufficient': a.get('plane_translation_normal_proxy_sufficient'),
+            'global_plane_sufficient': b.get('plane_translation_normal_proxy_sufficient'),
+            'local_plane_score': a.get('plane_score_heuristic'),
+            'global_plane_score': b.get('plane_score_heuristic'),
+            'global_plane_external_xyz_points': b.get('plane_external_xyz_point_count'),
+            **normal_match,
             'local_qualified_points': a['qualified_points'],
             'global_qualified_points': b['qualified_points'],
             'global_qualified_points_with_outside_obs':
@@ -744,6 +980,7 @@ def compare(args: argparse.Namespace) -> int:
         'schema_version': 1,
         'kind': 'kitti_gt_sfm_local_vs_global_scene_comparison',
         'candidate_count': len(l),
+        'selection_metric': local['config'].get('selection_metric', 'feature'),
         'local_selected': sorted(select_l), 'global_selected': sorted(select_g),
         'selected_intersection': sorted(select_l & select_g),
         'selected_jaccard': len(select_l & select_g) / max(len(select_l | select_g), 1),
@@ -758,6 +995,8 @@ def compare(args: argparse.Namespace) -> int:
             'Equal windows, frame counts and geometric thresholds do not equalize '
             'feature matching / triangulation information.',
             'Both methods share the same heuristic, not a calibration metric.',
+            'Plane normal information is 3D translation-normal diversity, not a full 6DoF FIM.',
+            'Plane sufficiency is a thresholded heuristic, not extrinsic-calibration sufficiency.',
             'Two disjoint windows and max_scenes=2 trivially select both, regardless of ranks.',
             'Tied scores are ordered deterministically by start time and ID.',
         ],
@@ -821,6 +1060,33 @@ def build_parser() -> argparse.ArgumentParser:
         cfg.add_argument('--grid-y', type=int, default=6)
         cfg.add_argument('--min-qualified-points', type=int, default=100)
         cfg.add_argument('--max-scenes', type=int, default=2)
+        # Plane screening is the default; old SfM feature score is an explicit baseline.
+        cfg.add_argument('--selection-metric', choices=['plane', 'feature'], default='plane')
+        cfg.add_argument('--plane-threshold-m', type=float, default=0.15,
+                         help='Absolute point-to-plane RANSAC threshold (GT metric camera poses)')
+        cfg.add_argument('--plane-min-inliers', type=int, default=70)
+        cfg.add_argument('--plane-max-planes', type=int, default=8)
+        cfg.add_argument('--plane-max-points', type=int, default=12000)
+        cfg.add_argument('--plane-ransac-iters', type=int, default=400)
+        cfg.add_argument('--plane-neighbors', type=int, default=24)
+        cfg.add_argument('--plane-connectivity-factor', type=float, default=3.)
+        cfg.add_argument('--plane-min-width-ratio', type=float, default=.08)
+        cfg.add_argument('--plane-min-visible-frames', type=int, default=2)
+        cfg.add_argument('--plane-min-image-observations', type=int, default=8)
+        cfg.add_argument('--plane-min-hull-fraction', type=float, default=.003)
+        cfg.add_argument('--plane-min-grid-cells', type=int, default=3)
+        cfg.add_argument('--plane-information-weight', type=float, default=.15)
+        cfg.add_argument('--plane-regularizer', type=float, default=.01)
+        cfg.add_argument('--plane-min-normal-rank', type=int, choices=[1,2,3], default=3)
+        cfg.add_argument('--plane-normal-rank-ratio', type=float, default=.02)
+        cfg.add_argument('--plane-min-eigen-fraction', type=float, default=.02)
+        cfg.add_argument('--plane-min-planes', type=int, default=3)
+        cfg.add_argument('--plane-exclude-ground', action='store_true',
+                         help='Disable ground-like planes; may make rank-3 impossible')
+        cfg.add_argument('--plane-ground-angle-deg', type=float, default=25.)
+        cfg.add_argument('--plane-weak-motion-guidance', action='store_true',
+                         help='Use heuristic camera-rotation weak-axis gain in plane PROPOSALS only')
+        cfg.add_argument('--plane-seed', type=int, default=20261113)
     eva.set_defaults(func=evaluate)
     gev.set_defaults(func=evaluate_global)
 

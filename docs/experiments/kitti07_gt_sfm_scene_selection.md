@@ -1,5 +1,104 @@
 # KITTI07: GT-pose SfM Scene Selection experiment
 
+## UPDATE: Plane-normal-based Scene Selection (primary)
+
+The default selection metric for evaluate and evaluate-global is NOW
+--selection-metric plane. The previous feature/track score is still reported
+as geometry_score_heuristic, and can be restored as the sole selection
+criterion with --selection-metric feature.
+
+This adaptation is based on sfm_plane_window_screen(2).py (provided
+reference): local-neighbor RANSAC hypotheses, plane refitting, 3D connected
+support, non-collinearity/width checks, multi-view 2D image support,
+and normal-direction information/logdet. Unlike its original approach of
+detecting global planes first and then only checking image visibility per
+window, the default implemented plane detector uses ONLY the image-supported,
+SfM-quality-filtered 3D points of each selected window to fit the plane.
+
+Pipeline for each candidate:
+  1. Filter points by >=min-track window observations, window parallax
+     and reprojection error under fixed GT Camera poses.
+  2. Extract planar connected subsets with local-neighbor RANSAC.
+  3. Reject insufficient spatial support, low width, few observed images
+     and low 2D coverage; refit normals on those validated points.
+  4. H_plane = sum_p w_p * n_p n_p^T (NORMALS IN WORLD COORDINATES).
+  5. Save rank, normal eigenvalues, min_eigenvalue/trace and regularized
+     logdet score. Require full-rank normal diversity before marking the
+     window plane-sufficient (defaults: >=3 supported planes, rank>=3,
+     min eigenvalue fraction >=0.02).
+  6. Greedily select non-overlapping eligible windows by complementary
+     marginal logdet gain of their combined normal matrices.
+
+Important: this is a translation-normal diversity PROXY, not 6DoF
+Camera-LiDAR extrinsic observability, not a calibrated Fisher Information
+Matrix, and not proof of downstream calibration sufficiency. Heuristic
+plane confidence weights depend on support and fit RMS, not known noise.
+
+Example (same prepared and reconstructed KITTI07 data as above):
+
+    python scripts/experiments/run_kitti_gt_sfm_scene_selection.py evaluate \
+      --out results/kitti07_gt_sfm_compare \
+      --selection-metric plane \
+      --min-track 3 --min-parallax-deg 1 --max-reproj-px 2 \
+      --plane-threshold-m 0.15 \
+      --plane-min-inliers 70 --plane-min-planes 3 \
+      --plane-min-normal-rank 3 --plane-min-eigen-fraction 0.02 \
+      --max-scenes 2
+
+Run evaluate-global with EXACTLY the same arguments, replacing evaluate with
+evaluate-global. compare checks all relevant thresholds/modes for equality.
+--selection-metric feature lets users reproduce previous point/track coverage
+experiments without applying plane selection.
+
+Output changes:
+- scene_scores.csv and global_scene_scores.csv: original feature score PLUS
+  plane_count, plane_normal_rank, plane_normal_min_eigen_fraction,
+  plane_normal_eigenvalues, plane_translation_normal_proxy_sufficient,
+  plane_score_heuristic, selection_score, eligible and plane information.
+- local_plane_details.json / global_plane_details.json: per-window extracted
+  plane normals, offsets, inlier counts, connected point support, image support,
+  plane-fit RMSE, width-ratio, heuristic weight, and number of globally
+  triangulated points with outside-window observations.
+- scene_comparison.csv/json: local/global plane count, rank,
+  plane-score, sufficiency flags, global outside-window support counts,
+  rank changes, top-K overlap and selected-set Jaccard. For matched planes,
+  the comparison also computes sign-invariant plane-normal angular differences
+  and symmetric centroid-to-plane separation using a 15deg / 2x RANSAC
+  threshold gate. This is a geometric plane match proxy, not a calibrated
+  Camera-LiDAR correspondence.
+- scene_selection.json and global_scene_selection.json: ranked scene records
+  and non-overlapping greedy-selected candidate records.
+
+The metric distance threshold is in METERS only because KITTI GT camera
+poses provide metric scale. There is no global COLMAP scale ambiguity in
+this GT-fixed experiment. Use sensitivity studies over RANSAC threshold,
+minimum points, fit RMSE, and normal-rank thresholds before any paper claim.
+
+Additional limitations:
+- Global XYZ is triangulated from the full sequence. Evaluating its in-window
+  observations and refitting its plane in a window does not erase outside-view
+  influence. This is NOT local-only reconstruction.
+- Independent Local SfM may reconstruct a different physical support set,
+  even when window frames and minimum-track constraints are identical.
+- The proposed weak-translation motion guidance from the provided code is
+  available optionally through --plane-weak-motion-guidance; it is a WORLD-
+  frame heuristic that influences proposal ranking, not the Normal rank
+  or final Camera-LiDAR Fisher matrix.
+- Ground-like planes are INCLUDED by default. Optional --plane-exclude-ground
+  filters by an orientation prior inferred from camera +Y (NOT measured
+  ground normals) and can make full rank impossible. Use only deliberately.
+- Default min-normal-rank=3 may reject many sparse KITTI windows, correctly
+  signaling insufficient 3D normal diversity under these proxy assumptions.
+  To explore partially constrained windows use --plane-min-normal-rank 2
+  and a lower --plane-min-planes, but do not call this full-rank sufficiency.
+- The comparator requires both Local and Global reports to be rerun with
+  the same selection-metric and parameters. Old reports are not silently
+  reinterpreted as plane results.
+- A candidate containing many pixels/points on a single normal direction
+  is now ineligible for the default full-rank plane selection regardless
+  of its favorable raw logdet score.
+
+
 ## Purpose
 
 The existing SPADE-Calib select-scenes ranks trajectory-motion diversity without reading SfM geometry. This experiment fixes **KITTI GT camera poses**, triangulates camera features **independently within each candidate window**, and ranks the resulting sparse SfM geometry. Only the camera poses are ground truth: triangulated points and scene quality scores are estimates, not 3D ground truth or extrinsic calibration accuracy.

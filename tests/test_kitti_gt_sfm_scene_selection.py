@@ -162,7 +162,8 @@ def test_reconstructed_scene_ranking_and_gt_pose_guard(tmp_path: Path):
         base = out / scene['name']
         create_model(base, scene, [9, 4, 2][k])
     assert sfm.main(['evaluate', '--out', str(out), '--min-qualified-points', '1',
-                     '--min-track', '3', '--min-parallax-deg', '.1']) == 0
+                     '--min-track', '3', '--min-parallax-deg', '.1',
+                     '--selection-metric', 'feature']) == 0
     report = json.loads((out / 'scene_selection.json').read_text())
     assert len(report['all_candidates']) == 3
     rows = {x['name']: x for x in report['all_candidates']}
@@ -181,7 +182,8 @@ def test_reconstructed_scene_ranking_and_gt_pose_guard(tmp_path: Path):
     parts[0] = ' '.join(fields)
     model.write_text('\n'.join(parts) + '\n')
     with pytest.raises(ValueError, match='changed fixed pose'):
-        sfm.main(['evaluate', '--out', str(out), '--min-qualified-points', '1'])
+        sfm.main(['evaluate', '--out', str(out), '--min-qualified-points', '1',
+                  '--selection-metric', 'feature'])
 
 
 def test_invalid_track_detection(tmp_path: Path):
@@ -275,7 +277,8 @@ def _populate_global_and_local(tmp_path: Path) -> Path:
 def test_global_sfm_scoring_tracks_are_restricted_to_window(tmp_path: Path):
     out = _populate_global_and_local(tmp_path)
     common = ['--out', str(out), '--min-qualified-points', '1',
-              '--min-parallax-deg', '.1', '--min-track', '3']
+              '--min-parallax-deg', '.1', '--min-track', '3',
+              '--selection-metric', 'feature']
     assert sfm.main(['evaluate', *common]) == 0
     assert sfm.main(['evaluate-global', *common]) == 0
     local = json.loads((out / 'scene_selection.json').read_text())
@@ -305,7 +308,7 @@ def test_global_sfm_scoring_tracks_are_restricted_to_window(tmp_path: Path):
 def test_global_compare_rejects_mismatched_quality_settings(tmp_path: Path):
     out = _populate_global_and_local(tmp_path)
     opts = ['--out', str(out), '--min-qualified-points', '1',
-            '--min-parallax-deg', '.1']
+            '--min-parallax-deg', '.1', '--selection-metric', 'feature']
     assert sfm.main(['evaluate', *opts]) == 0
     assert sfm.main(['evaluate-global', *opts, '--max-reproj-px', '1']) == 0
     with pytest.raises(ValueError, match='max_reproj_px'):
@@ -327,3 +330,127 @@ def test_global_prepare_does_not_reuse_local_frames(tmp_path: Path):
     assert '000030.png' in scene['image_names']
     with pytest.raises(FileExistsError):
         sfm._make_global_scene(args, manifest)
+
+
+
+def _create_planar_colmap_model(base: Path, scene: dict, planes: tuple[str, ...]):
+    """Write valid COLMAP text tracks for synthetic camera2-visible metric planes."""
+    from numpy.random import default_rng
+    rng = default_rng(20261116)
+    records = [(i * 11 + 2, name, 7)
+               for i, name in enumerate(scene['image_names'])]
+    sfm._write_seed_model(base, scene, records)
+    sparse = base / 'sparse_txt'
+    sparse.mkdir()
+    (sparse / 'cameras.txt').write_text(
+        (base / 'model_gt' / 'cameras.txt').read_text()
+    )
+    expected = sfm._read_images_txt(base / 'model_gt' / 'images.txt')
+    by_image = {i: [] for i in expected}
+    track_lines = []
+    fx, fy, cx, cy = scene['camera_params']
+    point_id = 1
+    for plane in planes:
+        uv = rng.uniform(-.5, .5, size=(230, 2))
+        if plane == 'z':
+            xyzs = np.column_stack((uv[:, 0], uv[:, 1], np.full(len(uv), 4.5)))
+        elif plane == 'x':
+            xyzs = np.column_stack((np.full(len(uv), 1.1),
+                                    uv[:, 0], 4.5 + uv[:, 1]))
+        elif plane == 'y':
+            xyzs = np.column_stack((uv[:, 0], np.full(len(uv), .9),
+                                    4.5 + uv[:, 1]))
+        else:
+            raise ValueError(plane)
+        for xyz in xyzs:
+            track = []
+            for img_id, rec in expected.items():
+                pose = sfm._pose_matrix(rec)
+                local = pose[:3, :3] @ xyz + pose[:3, 3]
+                if local[2] <= 0:
+                    continue
+                uv_px = (fx * local[0] / local[2] + cx,
+                         fy * local[1] / local[2] + cy)
+                if 0 <= uv_px[0] < scene['image_width'] and 0 <= uv_px[1] < scene['image_height']:
+                    obs_index = len(by_image[img_id])
+                    by_image[img_id].append((uv_px, point_id))
+                    track.append((img_id, obs_index))
+            if len(track) < 3:
+                continue
+            coord = ' '.join(f'{x:.17g}' for x in xyz)
+            obs = ' '.join(f'{i} {j}' for i, j in track)
+            track_lines.append(f'{point_id} {coord} 128 128 128 0.0 {obs}')
+            point_id += 1
+    images_txt = []
+    for image_id, rec in expected.items():
+        q, t = rec['qvec'], rec['tvec']
+        pose_line = (f'{image_id} ' + ' '.join(
+            f'{v:.17g}' for v in np.r_[q, t]) + f" 7 {rec['name']}")
+        points2d_line = ' '.join(
+            f'{xy[0]:.17g} {xy[1]:.17g} {pid}'
+            for xy, pid in by_image[image_id]
+        )
+        images_txt.append(pose_line + '\n' + points2d_line + '\n')
+    (sparse / 'images.txt').write_text(''.join(images_txt))
+    (sparse / 'points3D.txt').write_text('\n'.join(track_lines) + '\n')
+
+
+def test_plane_mode_end_to_end_selects_normal_diverse_scene(tmp_path: Path):
+    out = prepare(tmp_path)
+    _, scenes = sfm._scene_entries(out)
+    for scene, normals in zip(scenes, [('x', 'y', 'z'), ('z',), ('x',)]):
+        _create_planar_colmap_model(out / scene['name'], scene, normals)
+    args = [
+        'evaluate', '--out', str(out), '--selection-metric', 'plane',
+        '--min-qualified-points', '10', '--plane-min-inliers', '55',
+        '--plane-threshold-m', '.045', '--plane-max-planes', '6',
+        '--plane-ransac-iters', '350',
+        '--plane-min-grid-cells', '1',
+        '--plane-min-hull-fraction', '.0001',
+        '--plane-min-image-observations', '5',
+        '--plane-min-visible-frames', '2',
+        '--max-scenes', '2',
+    ]
+    assert sfm.main(args) == 0
+    result = json.loads((out / 'scene_selection.json').read_text())
+    rows = {r['name']: r for r in result['all_candidates']}
+    assert rows['slide_000']['plane_count'] >= 3
+    assert rows['slide_000']['plane_normal_rank'] == 3
+    assert rows['slide_000']['plane_translation_normal_proxy_sufficient'] is True
+    assert rows['slide_000']['eligible'] is True
+    assert rows['slide_000']['selection_score'] > 0.
+    assert rows['slide_001']['plane_normal_rank'] <= 1
+    assert rows['slide_001']['plane_translation_normal_proxy_sufficient'] is False
+    assert rows['slide_001']['eligible'] is False
+    assert result['scenes_selected'][0]['name'] == 'slide_000'
+    details = json.loads((out / 'local_plane_details.json').read_text())
+    assert details['plane_count'] >= 3
+    assert all(p['window_only_triangulation'] is True
+               for p in details['planes'])
+
+
+
+def test_local_global_plane_match_handles_normal_sign_and_spatial_offset():
+    local = [{
+        'normal_world_xyz': [1., 0., 0.], 'offset_m': -2.,
+        'centroid_world_xyz': [2., 1., 0.]
+    }]
+    same_wall_flipped = [{
+        'normal_world_xyz': [-1., 0., 0.], 'offset_m': 2.,
+        'centroid_world_xyz': [2., -1., 0.]
+    }]
+    comparison = sfm._compare_plane_sets(
+        local, same_wall_flipped, distance_threshold_m=.25
+    )
+    assert comparison['matched_plane_count'] == 1
+    assert comparison['plane_normal_angle_median_deg'] == 0.
+    assert comparison['plane_offset_median_m'] == 0.
+    far_parallel_wall = [{
+        'normal_world_xyz': [1., 0., 0.], 'offset_m': -20.,
+        'centroid_world_xyz': [20., 1., 0.]
+    }]
+    comparison = sfm._compare_plane_sets(
+        local, far_parallel_wall, distance_threshold_m=.25
+    )
+    assert comparison['matched_plane_count'] == 0
+    assert comparison['plane_normal_angle_median_deg'] is None
