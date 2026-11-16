@@ -16,8 +16,15 @@ from numpy.typing import NDArray
 from scipy.spatial.transform import Rotation
 
 
-def parse_kitti_odom_calib(path: str | Path) -> dict[str, NDArray[np.float64]]:
-    """Read 3x4 P* and Tr matrices with explicit shape and finite validation."""
+def parse_kitti_odom_calib(
+    path: str | Path, *, require_tr: bool = True
+) -> dict[str, NDArray[np.float64]]:
+    """Read 3x4 KITTI calibration entries; require LiDAR Tr by default.
+
+    Camera-only KITTI Odometry color calibration files can contain P0..P3
+    but omit Tr. Pass require_tr=False ONLY for camera-only operations.
+    Camera-LiDAR extrinsic evaluation keeps the default Tr requirement.
+    """
     tables: dict[str, NDArray[np.float64]] = {}
     with Path(path).open("r", encoding="utf-8") as source:
         for line in source:
@@ -33,8 +40,13 @@ def parse_kitti_odom_calib(path: str | Path) -> dict[str, NDArray[np.float64]]:
             if not np.isfinite(matrix).all():
                 raise ValueError(f"KITTI calibration {key} contains nonfinite values")
             tables[key.strip()] = matrix
-    if not all(k in tables for k in ("P0", "Tr")):
-        raise ValueError("KITTI Odometry calibration requires P0 and Tr")
+    required = ("P0", "Tr") if require_tr else ("P0",)
+    missing = [name for name in required if name not in tables]
+    if missing:
+        raise ValueError(
+            f"KITTI Odometry calibration requires {', '.join(required)}; "
+            f"missing {', '.join(missing)}"
+        )
     return tables
 
 
