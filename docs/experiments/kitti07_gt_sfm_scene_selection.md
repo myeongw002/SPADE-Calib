@@ -6,7 +6,7 @@ The existing SPADE-Calib select-scenes ranks trajectory-motion diversity without
 
 KITTI Odometry inputs:
 - dataset/sequences/07/times.txt
-- dataset/sequences/07/calib.txt containing rectified P0 and P2 matrices
+- dataset/sequences/07/calib.txt containing rectified P0 and P2 matrices; **Tr is not required** for camera-only GT SfM (as in the KITTI data_odometry_color download)
 - dataset/sequences/07/image_2/000000.png, etc.
 - dataset/poses/07.txt (T_world_rectified_camera0)
 - locally installed COLMAP executable
