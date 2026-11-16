@@ -953,6 +953,33 @@ def build_parser() -> argparse.ArgumentParser:
         cfg.add_argument('--grid-y', type=int, default=6)
         cfg.add_argument('--min-qualified-points', type=int, default=100)
         cfg.add_argument('--max-scenes', type=int, default=2)
+        # Plane screening is the default; old SfM feature score is an explicit baseline.
+        cfg.add_argument('--selection-metric', choices=['plane', 'feature'], default='plane')
+        cfg.add_argument('--plane-threshold-m', type=float, default=0.15,
+                         help='Absolute point-to-plane RANSAC threshold (GT metric camera poses)')
+        cfg.add_argument('--plane-min-inliers', type=int, default=70)
+        cfg.add_argument('--plane-max-planes', type=int, default=8)
+        cfg.add_argument('--plane-max-points', type=int, default=12000)
+        cfg.add_argument('--plane-ransac-iters', type=int, default=400)
+        cfg.add_argument('--plane-neighbors', type=int, default=24)
+        cfg.add_argument('--plane-connectivity-factor', type=float, default=3.)
+        cfg.add_argument('--plane-min-width-ratio', type=float, default=.08)
+        cfg.add_argument('--plane-min-visible-frames', type=int, default=2)
+        cfg.add_argument('--plane-min-image-observations', type=int, default=8)
+        cfg.add_argument('--plane-min-hull-fraction', type=float, default=.003)
+        cfg.add_argument('--plane-min-grid-cells', type=int, default=3)
+        cfg.add_argument('--plane-information-weight', type=float, default=.15)
+        cfg.add_argument('--plane-regularizer', type=float, default=.01)
+        cfg.add_argument('--plane-min-normal-rank', type=int, choices=[1,2,3], default=3)
+        cfg.add_argument('--plane-normal-rank-ratio', type=float, default=.02)
+        cfg.add_argument('--plane-min-eigen-fraction', type=float, default=.02)
+        cfg.add_argument('--plane-min-planes', type=int, default=3)
+        cfg.add_argument('--plane-exclude-ground', action='store_true',
+                         help='Disable ground-like planes; may make rank-3 impossible')
+        cfg.add_argument('--plane-ground-angle-deg', type=float, default=25.)
+        cfg.add_argument('--plane-weak-motion-guidance', action='store_true',
+                         help='Use heuristic camera-rotation weak-axis gain in plane PROPOSALS only')
+        cfg.add_argument('--plane-seed', type=int, default=20261113)
     eva.set_defaults(func=evaluate)
     gev.set_defaults(func=evaluate_global)
 
