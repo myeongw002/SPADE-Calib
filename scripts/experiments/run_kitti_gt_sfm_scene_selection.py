@@ -800,16 +800,34 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument('--only', nargs='*', help='Subset of scene IDs')
     run.set_defaults(func=reconstruct)
 
-    eva = sub.add_parser('evaluate', help='Verify fixed GT pose and rank SfM geometry')
-    eva.add_argument('--out', type=Path, required=True)
-    eva.add_argument('--min-track', type=int, default=3)
-    eva.add_argument('--min-parallax-deg', type=float, default=1.0)
-    eva.add_argument('--max-reproj-px', type=float, default=2.0)
-    eva.add_argument('--grid-x', type=int, default=8)
-    eva.add_argument('--grid-y', type=int, default=6)
-    eva.add_argument('--min-qualified-points', type=int, default=100)
-    eva.add_argument('--max-scenes', type=int, default=2)
+    grun = sub.add_parser('reconstruct-global',
+                          help='Reconstruct all KITTI camera frames using fixed GT poses')
+    grun.add_argument('--out', type=Path, required=True)
+    grun.add_argument('--colmap', type=str, default='colmap')
+    grun.add_argument('--matcher', choices=['sequential', 'exhaustive'], default='sequential')
+    grun.add_argument('--sequential-overlap', type=int, default=15)
+    grun.add_argument('--timeout-sec', type=int, default=7200)
+    grun.set_defaults(func=reconstruct_global)
+
+    eva = sub.add_parser('evaluate', help='Rank independent local-window reconstructions')
+    gev = sub.add_parser('evaluate-global',
+                         help='Rank windows using one global reconstruction')
+    for cfg in (eva, gev):
+        cfg.add_argument('--out', type=Path, required=True)
+        cfg.add_argument('--min-track', type=int, default=3)
+        cfg.add_argument('--min-parallax-deg', type=float, default=1.0)
+        cfg.add_argument('--max-reproj-px', type=float, default=2.0)
+        cfg.add_argument('--grid-x', type=int, default=8)
+        cfg.add_argument('--grid-y', type=int, default=6)
+        cfg.add_argument('--min-qualified-points', type=int, default=100)
+        cfg.add_argument('--max-scenes', type=int, default=2)
     eva.set_defaults(func=evaluate)
+    gev.set_defaults(func=evaluate_global)
+
+    comp = sub.add_parser('compare', help='Compare Local and Global SfM rankings')
+    comp.add_argument('--out', type=Path, required=True)
+    comp.add_argument('--top-k', type=int, default=3)
+    comp.set_defaults(func=compare)
     return p
 
 
