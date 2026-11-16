@@ -622,6 +622,62 @@ def evaluate(args: argparse.Namespace) -> int:
     return 0
 
 
+def evaluate_global(args: argparse.Namespace) -> int:
+    """Score only in-window tracks, using globally triangulated 3D positions."""
+    if (args.min_track < 2 or args.min_parallax_deg < 0 or
+            args.max_reproj_px <= 0 or args.grid_x < 1 or args.grid_y < 1 or
+            args.min_qualified_points < 1 or args.max_scenes < 1 or
+            not np.isfinite([args.min_parallax_deg, args.max_reproj_px]).all()):
+        raise ValueError('Invalid geometry quality constraints')
+    _, scenes = _scene_entries(args.out)
+    base = args.out / 'global'
+    meta_path = base / 'scene.json'
+    if not meta_path.is_file():
+        raise FileNotFoundError('Run reconstruct-global before evaluate-global')
+    global_scene = json.loads(meta_path.read_text(encoding='utf-8'))
+    if global_scene.get('scope') != 'full_sequence_all_images_not_selected_windows':
+        raise ValueError('Not a full-sequence known-pose global model')
+    images = verify_fixed_poses(base, global_scene)
+    points = base / 'sparse_txt' / 'points3D.txt'
+    if not points.is_file():
+        raise FileNotFoundError('Missing global points3D.txt')
+    rows = [_score_scene(base, scene, args, global_images=images, source_model=points)
+            for scene in scenes]
+    ranked = sorted((r for r in rows if r['eligible']),
+                    key=lambda r: (-r['geometry_score_heuristic'],
+                                   r['start_s'], r['name']))
+    selected = []
+    for row in ranked:
+        if (len(selected) < args.max_scenes and
+                all(row['stop_s'] <= x['start_s'] or row['start_s'] >= x['stop_s']
+                    for x in selected)):
+            selected.append(row)
+    with (args.out / 'global_scene_scores.csv').open(
+            'w', newline='', encoding='utf-8') as fh:
+        writer = csv.DictWriter(fh, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    _write_json(args.out / 'global_scene_selection.json', {
+        'schema_version': 1,
+        'kind': 'gt_fixed_camera_pose_global_sfm_window_geometry_selection',
+        'model_scope': 'all_KITTI_camera_frames',
+        'score_scope': 'global_xyz_with_in_window_feature_observations',
+        'config': {k: v for k, v in vars(args).items()
+                   if k != 'func' and not isinstance(v, Path)},
+        'scenes_ranked': ranked, 'scenes_selected': selected,
+        'scenes_selected_count': len(selected), 'all_candidates': rows,
+        'caveats': [
+            'Global XYZ was triangulated using outside-window observations.',
+            'Window-only parallax/reprojection checks do not remove XYZ data leakage.',
+            'Feature count and coverage depend on image texture, not just 3D geometry.',
+            'No calibration was run; scene scores are not extrinsic accuracy.',
+        ],
+    })
+    LOG.info('Global SfM scoring finished: %d candidates, %d selected',
+             len(rows), len(selected))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.ArgumentDefaultsHelpFormatter)
