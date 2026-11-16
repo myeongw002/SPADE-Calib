@@ -156,3 +156,32 @@ def test_real_backend_rigid_accumulation_cli(tmp_path: Path) -> None:
         quality = list(csv.DictReader(fh))
     assert any(p["kind"] == "ground" for p in quality)
     assert any(p["kind"] == "non_ground" for p in quality)
+
+
+def test_real_backend_pgo_accumulation_cli(tmp_path: Path) -> None:
+    """Existing pilot accepts PGO and exports its diagnostics without Joint."""
+    times_file, odom_file, scans = _synthetic_recording(tmp_path)
+    args = (_args(tmp_path, times_file, odom_file)
+            + ["--velodyne", str(scans), "--refiner", "pgo",
+               "--pgo-iterations", "2", "--pgo-pair-max-nfev", "15",
+               "--refine-voxel-m", ".20", "--refine-max-samples", "1200",
+               "--no-preview", "--ransac-iters", "30",
+               "--min-plane-points", "90", "--max-walls", "1"])
+    assert pilot.main(args) == 0
+    out = tmp_path / "results"
+    with (out / "summary.csv").open(encoding="utf-8-sig") as fh:
+        rows = list(csv.DictReader(fh))
+    assert len(rows) == 2
+    for row in rows:
+        assert row['status'] == 'ok'
+        folder = out / row['experiment']
+        info = json.loads((folder / 'refinement.json').read_text())
+        assert info['solver'] == 'spade_calib.lidar.pgo_solver.solve_pgo'
+        assert info['settings']['pairs']['d1_roi'] is False
+        assert info['iterations'][0]['pair_edges'] >= 1
+        assert int(row['registration_pair_edges_first']) >= 1
+        assert (folder / 'refined_transforms.npy').exists()
+        assert (folder / 'refined_sample.npz').exists()
+        matrices = np.load(folder / 'refined_transforms.npy')
+        np.testing.assert_allclose(matrices[int(row['anchor_local_scan_id'])],
+                                   np.eye(4), atol=1e-8)
