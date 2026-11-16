@@ -43,8 +43,9 @@ def parse_kitti_odom_calib(
     required = ("P0", "Tr") if require_tr else ("P0",)
     missing = [name for name in required if name not in tables]
     if missing:
+        required_label = "P0 and Tr" if require_tr else "P0"
         raise ValueError(
-            f"KITTI Odometry calibration requires {', '.join(required)}; "
+            f"KITTI Odometry calibration requires {required_label}; "
             f"missing {', '.join(missing)}"
         )
     return tables
