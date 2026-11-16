@@ -162,7 +162,8 @@ def test_reconstructed_scene_ranking_and_gt_pose_guard(tmp_path: Path):
         base = out / scene['name']
         create_model(base, scene, [9, 4, 2][k])
     assert sfm.main(['evaluate', '--out', str(out), '--min-qualified-points', '1',
-                     '--min-track', '3', '--min-parallax-deg', '.1']) == 0
+                     '--min-track', '3', '--min-parallax-deg', '.1',
+                     '--selection-metric', 'feature']) == 0
     report = json.loads((out / 'scene_selection.json').read_text())
     assert len(report['all_candidates']) == 3
     rows = {x['name']: x for x in report['all_candidates']}
@@ -181,7 +182,8 @@ def test_reconstructed_scene_ranking_and_gt_pose_guard(tmp_path: Path):
     parts[0] = ' '.join(fields)
     model.write_text('\n'.join(parts) + '\n')
     with pytest.raises(ValueError, match='changed fixed pose'):
-        sfm.main(['evaluate', '--out', str(out), '--min-qualified-points', '1'])
+        sfm.main(['evaluate', '--out', str(out), '--min-qualified-points', '1',
+                  '--selection-metric', 'feature'])
 
 
 def test_invalid_track_detection(tmp_path: Path):
@@ -275,7 +277,8 @@ def _populate_global_and_local(tmp_path: Path) -> Path:
 def test_global_sfm_scoring_tracks_are_restricted_to_window(tmp_path: Path):
     out = _populate_global_and_local(tmp_path)
     common = ['--out', str(out), '--min-qualified-points', '1',
-              '--min-parallax-deg', '.1', '--min-track', '3']
+              '--min-parallax-deg', '.1', '--min-track', '3',
+              '--selection-metric', 'feature']
     assert sfm.main(['evaluate', *common]) == 0
     assert sfm.main(['evaluate-global', *common]) == 0
     local = json.loads((out / 'scene_selection.json').read_text())
@@ -305,7 +308,7 @@ def test_global_sfm_scoring_tracks_are_restricted_to_window(tmp_path: Path):
 def test_global_compare_rejects_mismatched_quality_settings(tmp_path: Path):
     out = _populate_global_and_local(tmp_path)
     opts = ['--out', str(out), '--min-qualified-points', '1',
-            '--min-parallax-deg', '.1']
+            '--min-parallax-deg', '.1', '--selection-metric', 'feature']
     assert sfm.main(['evaluate', *opts]) == 0
     assert sfm.main(['evaluate-global', *opts, '--max-reproj-px', '1']) == 0
     with pytest.raises(ValueError, match='max_reproj_px'):
