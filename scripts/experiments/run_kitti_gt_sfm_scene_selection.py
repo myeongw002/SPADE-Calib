@@ -24,7 +24,7 @@ import struct
 import subprocess
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -457,17 +457,47 @@ def _iter_points(path: Path):
             yield point_id, xyz, pairs
 
 
-def _score_scene(base: Path, scene: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
-    images = verify_fixed_poses(base, scene)
+def _score_scene(base: Path, scene: dict[str, Any], args: argparse.Namespace, *,
+                 global_images: dict[int, dict[str, Any]] | None = None,
+                 source_model: Path | None = None) -> dict[str, Any]:
+    """Score only in-window feature observations.
+
+    With global_images, XYZ is triangulated from the FULL sequence even though
+    track support, parallax, reprojection and grid coverage use only observations
+    from this window. This is a deliberately global-information-assisted proxy.
+    """
+    if global_images is None:
+        images = verify_fixed_poses(base, scene)
+        is_global = False
+    else:
+        selected_names = set(scene['image_names'])
+        images = {i: record for i, record in global_images.items()
+                  if record['name'] in selected_names}
+        if len(images) != len(selected_names):
+            missing = selected_names - {r['name'] for r in images.values()}
+            raise ValueError(f"Global SfM missing window image poses: {sorted(missing)[:5]}")
+        is_global = True
     width, height = scene['image_width'], scene['image_height']
     fx, fy, cx, cy = scene['camera_params']
     mats = {i: _pose_matrix(r) for i, r in images.items()}
     centers = {i: -m[:3, :3].T @ m[:3, 3] for i, m in mats.items()}
     bins = {i: np.zeros((args.grid_y, args.grid_x), dtype=bool) for i in images}
     all_points = qualified = 0
+    external_tracks = external_qualified = 0
     lengths, parallax, reproj = [], [], []
-    for point_id, xyz, track in _iter_points(base / 'sparse_txt' / 'points3D.txt'):
+    points_path = (source_model if source_model is not None
+                   else base / 'sparse_txt' / 'points3D.txt')
+    for point_id, xyz, full_track in _iter_points(points_path):
+        track = [(image_id, point_index) for image_id, point_index in full_track
+                 if image_id in images]
+        if not is_global and len(track) != len(full_track):
+            raise ValueError(f'Local COLMAP point {point_id} references an unknown image')
+        if not track:
+            continue  # Global point never observed in this window.
         all_points += 1
+        observed_outside = len(track) < len(full_track)
+        if observed_outside:
+            external_tracks += 1
         if len(track) < args.min_track:
             continue
         ray_vectors = []
@@ -505,6 +535,8 @@ def _score_scene(base: Path, scene: dict[str, Any], args: argparse.Namespace) ->
         if angle < args.min_parallax_deg or pixel_error > args.max_reproj_px:
             continue
         qualified += 1
+        if observed_outside:
+            external_qualified += 1
         lengths.append(len(good_observations))
         parallax.append(angle)
         reproj.append(pixel_error)
@@ -525,6 +557,9 @@ def _score_scene(base: Path, scene: dict[str, Any], args: argparse.Namespace) ->
         'name': scene['name'], 'start_s': scene['start_s'], 'stop_s': scene['stop_s'],
         'image_count': n_images, 'triangulated_points': all_points,
         'qualified_points': qualified, 'qualified_fraction': qualified / max(all_points, 1),
+        'source_scope': 'global_xyz_window_observations' if is_global else 'local_xyz',
+        'points_with_external_observations': external_tracks,
+        'qualified_points_with_external_observations': external_qualified,
         'qualified_points_per_image': points_per_image,
         'median_track_length': float(np.median(lengths)) if lengths else 0.,
         'median_parallax_deg': median_parallax,
