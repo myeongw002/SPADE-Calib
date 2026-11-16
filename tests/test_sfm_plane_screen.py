@@ -92,7 +92,9 @@ def test_unobserved_plane_is_not_qualified_even_if_xyz_is_dense():
 
 def test_global_external_support_is_reported_not_mistaken_for_local_retriangulation():
     points, images = _points(('x', 'y', 'z'), outside=True)
-    report, planes = screen_window_planes(points, images, _settings())
+    report, planes = screen_window_planes(
+        points, images, _settings(), globally_triangulated=True
+    )
     assert report['plane_count'] >= 3
     assert all(p['window_only_triangulation'] is False for p in planes)
     assert all(p['candidate_points_with_outside_observations'] == p['inlier_count']
