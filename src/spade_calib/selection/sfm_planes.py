@@ -210,6 +210,8 @@ def screen_window_planes(
     points: Sequence[PlanePoint],
     images: Mapping[int, ImageGeometry],
     settings: PlaneScreenSettings,
+    *,
+    globally_triangulated: bool = False,
 ) -> tuple[dict, list[dict]]:
     """Run RANSAC on per-window-qualified points and return proxy + plane records.
 
@@ -319,7 +321,7 @@ def screen_window_planes(
             'plane_fit_rmse_m': float(rms),
             'in_plane_width_ratio': float(width_ratio),
             'candidate_points_with_outside_observations': int(outside_count),
-            'window_only_triangulation': False,
+            'window_only_triangulation': not globally_triangulated,
         }
         found.append(plane)
         h += weight * np.outer(n, n)
