@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """KITTI07 fixed-GT-pose COLMAP SfM and geometry-aware scene selection.
 
-Three separate stages:
-  prepare: define independent scene candidates and GT camera poses.
-  reconstruct: run COLMAP feature extraction/matching/point_triangulation
-               separately for EACH candidate (no pose estimation or BA).
-  evaluate: verify output poses stayed fixed and rank scene geometry quality.
+Stages:
+  prepare: define identical candidate windows and known GT camera poses.
+  reconstruct / evaluate: independent local-window COLMAP and ranking.
+  reconstruct-global / evaluate-global: full-sequence COLMAP once, score
+    tracked points in those SAME windows (global 3D coordinates may use
+    observations OUTSIDE each window).
+  compare: join rankings/scores using identical candidate IDs.
 
 Sparse points are triangulated estimates, NOT ground-truth 3D geometry.
 """
@@ -246,54 +248,118 @@ def _scene_entries(out: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     return manifest, scenes
 
 
-def reconstruct(args: argparse.Namespace) -> int:
+def _validate_reconstruction_options(args: argparse.Namespace) -> None:
     if args.timeout_sec < 1 or args.sequential_overlap < 1:
         raise ValueError('Invalid COLMAP timeout/overlap')
     if shutil.which(args.colmap) is None and not Path(args.colmap).is_file():
         raise FileNotFoundError(f'COLMAP binary not found: {args.colmap}')
+
+
+def _reconstruct_fixed_model(base: Path, scene: dict[str, Any],
+                             image_dir: Path, args: argparse.Namespace) -> None:
+    """Common COLMAP runner. Each supplied model is constructed from fixed GT poses."""
+    db = base / 'database.db'
+    seed = base / 'model_gt'
+    sparse = base / 'sparse'
+    sparse_txt = base / 'sparse_txt'
+    if any(path.exists() for path in (db, seed, sparse, sparse_txt)):
+        raise FileExistsError(
+            f'{base}: COLMAP files exist. Use a fresh directory to avoid stale-model reuse.')
+    feature = [args.colmap, 'feature_extractor',
+               '--database_path', str(db), '--image_path', str(image_dir),
+               '--image_list_path', str(base / 'image_list.txt'),
+               '--ImageReader.single_camera', '1',
+               '--ImageReader.camera_model', 'PINHOLE',
+               '--ImageReader.camera_params',
+               ','.join(f'{x:.17g}' for x in scene['camera_params'])]
+    _run_colmap(feature, base / '01_feature.log', args.timeout_sec)
+    records = _db_images(db, scene['image_names'], scene['image_width'],
+                         scene['image_height'], scene['camera_params'])
+    _write_seed_model(base, scene, records)
+    if args.matcher == 'sequential':
+        matcher = [args.colmap, 'sequential_matcher', '--database_path', str(db),
+                   '--SequentialMatching.overlap', str(args.sequential_overlap)]
+    else:
+        matcher = [args.colmap, 'exhaustive_matcher', '--database_path', str(db)]
+    _run_colmap(matcher, base / '02_match.log', args.timeout_sec)
+    sparse.mkdir()
+    _run_colmap([args.colmap, 'point_triangulator',
+                 '--database_path', str(db), '--image_path', str(image_dir),
+                 '--input_path', str(seed), '--output_path', str(sparse)],
+                base / '03_triangulate.log', args.timeout_sec)
+    sparse_txt.mkdir()
+    _run_colmap([args.colmap, 'model_converter', '--input_path', str(sparse),
+                 '--output_path', str(sparse_txt), '--output_type', 'TXT'],
+                base / '04_convert.log', args.timeout_sec)
+    verify_fixed_poses(base, scene)
+
+
+def reconstruct(args: argparse.Namespace) -> int:
+    _validate_reconstruction_options(args)
     manifest, scenes = _scene_entries(args.out)
-    image_dir = Path(manifest['image_path'])
+    if args.only:
+        available = {s['name'] for s in scenes}
+        unknown = set(args.only) - available
+        if unknown:
+            raise ValueError(f'Unknown local scene IDs: {sorted(unknown)}')
     for scene in scenes:
-        name = scene['name']
-        if args.only and name not in args.only:
+        if args.only and scene['name'] not in args.only:
             continue
-        base = args.out / name
-        db = base / 'database.db'
-        seed = base / 'model_gt'
-        sparse = base / 'sparse'
-        sparse_txt = base / 'sparse_txt'
-        if db.exists() or seed.exists() or sparse.exists() or sparse_txt.exists():
-            raise FileExistsError(
-                f'{name}: COLMAP outputs already exist; use a fresh output folder '
-                'to prevent stale database/model reuse')
-        feature = [args.colmap, 'feature_extractor',
-                   '--database_path', str(db), '--image_path', str(image_dir),
-                   '--image_list_path', str(base / 'image_list.txt'),
-                   '--ImageReader.single_camera', '1',
-                   '--ImageReader.camera_model', 'PINHOLE',
-                   '--ImageReader.camera_params',
-                   ','.join(f'{x:.17g}' for x in scene['camera_params'])]
-        _run_colmap(feature, base / '01_feature.log', args.timeout_sec)
-        records = _db_images(db, scene['image_names'], scene['image_width'],
-                             scene['image_height'], scene['camera_params'])
-        _write_seed_model(base, scene, records)
-        if args.matcher == 'sequential':
-            matcher = [args.colmap, 'sequential_matcher', '--database_path', str(db),
-                       '--SequentialMatching.overlap', str(args.sequential_overlap)]
-        else:
-            matcher = [args.colmap, 'exhaustive_matcher', '--database_path', str(db)]
-        _run_colmap(matcher, base / '02_match.log', args.timeout_sec)
-        sparse.mkdir()
-        _run_colmap([args.colmap, 'point_triangulator',
-                     '--database_path', str(db), '--image_path', str(image_dir),
-                     '--input_path', str(seed), '--output_path', str(sparse)],
-                    base / '03_triangulate.log', args.timeout_sec)
-        sparse_txt.mkdir()
-        _run_colmap([args.colmap, 'model_converter', '--input_path', str(sparse),
-                     '--output_path', str(sparse_txt), '--output_type', 'TXT'],
-                    base / '04_convert.log', args.timeout_sec)
-        verify_fixed_poses(base, scene)
-        LOG.info('Completed fixed-pose triangulation: %s', name)
+        _reconstruct_fixed_model(args.out / scene['name'], scene,
+                                 Path(manifest['image_path']), args)
+        LOG.info('Completed fixed-pose local SfM: %s', scene['name'])
+    return 0
+
+
+def _make_global_scene(args: argparse.Namespace,
+                       manifest: dict[str, Any]) -> dict[str, Any]:
+    """Prepare *all* sequence camera frames; never use selected-window subsets."""
+    seq = Path(manifest['sequence'])
+    times, twc, intrinsics = load_kitti_camera_gt(
+        seq / 'times.txt', Path(manifest['poses_path']), seq / 'calib.txt',
+        int(manifest['camera_index']))
+    if len(times) != int(manifest['num_kitti_frames']):
+        raise ValueError('KITTI sequence changed since prepare: frame count mismatch')
+    image_dir = Path(manifest['image_path'])
+    names = [f'{frame:06d}.png' for frame in range(len(times))]
+    sizes = {read_png_size(image_dir / name) for name in names}
+    if len(sizes) != 1:
+        raise ValueError(f'Global SfM images have inconsistent dimensions: {sizes}')
+    width, height = sizes.pop()
+    params = [float(intrinsics[0, 0]), float(intrinsics[1, 1]),
+              float(intrinsics[0, 2]), float(intrinsics[1, 2])]
+    # Check every candidate uses exactly the same calibration and dimensions.
+    for window in manifest['scenes']:
+        local = json.loads((args.out / window['name'] / 'scene.json').read_text())
+        if (local['camera_params'] != params or
+                (local['image_width'], local['image_height']) != (width, height)):
+            raise ValueError(f'{window["name"]}: inconsistent local/global calibration')
+    base = args.out / 'global'
+    base.mkdir(exist_ok=False)
+    scene = {
+        'name': 'global', 'start_s': float(times[0]), 'stop_s': float(times[-1]),
+        'frames': list(range(len(times))), 'image_names': names,
+        'image_count': len(names), 'image_width': width, 'image_height': height,
+        'camera_model': 'PINHOLE', 'camera_params': params,
+        'pose_convention': f'T_world_rectified_camera_{manifest["camera_index"]}',
+        'scope': 'full_sequence_all_images_not_selected_windows',
+    }
+    np.save(base / 'gt_T_world_camera.npy', twc)
+    (base / 'image_list.txt').write_text('\n'.join(names) + '\n', encoding='utf-8')
+    _write_json(base / 'scene.json', scene)
+    return scene
+
+
+def reconstruct_global(args: argparse.Namespace) -> int:
+    """Triangulate exactly once using ALL available KITTI camera frames."""
+    _validate_reconstruction_options(args)
+    manifest, _ = _scene_entries(args.out)
+    if (args.out / 'global').exists():
+        raise FileExistsError(f'Global model already exists: {args.out / "global"}')
+    scene = _make_global_scene(args, manifest)
+    _reconstruct_fixed_model(args.out / 'global', scene,
+                             Path(manifest['image_path']), args)
+    LOG.info('Completed GT-fixed global SfM: %d images', scene['image_count'])
     return 0
 
 
