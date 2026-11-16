@@ -678,6 +678,96 @@ def evaluate_global(args: argparse.Namespace) -> int:
     return 0
 
 
+def compare(args: argparse.Namespace) -> int:
+    """Join matched candidate windows and compare Local/Global geometry rankings."""
+    if args.top_k < 1:
+        raise ValueError('--top-k must be positive')
+    local = json.loads((args.out / 'scene_selection.json').read_text(encoding='utf-8'))
+    glob = json.loads((args.out / 'global_scene_selection.json').read_text(encoding='utf-8'))
+    if (local.get('kind') != 'gt_fixed_camera_pose_sparse_sfm_scene_selection'
+            or glob.get('kind') != 'gt_fixed_camera_pose_global_sfm_window_geometry_selection'):
+        raise ValueError('Expected independent Local and Global SfM evaluation reports')
+    for key in ('min_track', 'min_parallax_deg', 'max_reproj_px',
+                'grid_x', 'grid_y', 'min_qualified_points', 'max_scenes'):
+        if local['config'].get(key) != glob['config'].get(key):
+            raise ValueError(f'Local/Global settings differ in {key}; rerun with equal settings')
+    l = {row['name']: row for row in local['all_candidates']}
+    g = {row['name']: row for row in glob['all_candidates']}
+    if not l or set(l) != set(g):
+        raise ValueError('Local/Global reports have different candidate window IDs')
+    for name in l:
+        if any(l[name][key] != g[name][key]
+               for key in ('start_s', 'stop_s', 'image_count')):
+            raise ValueError(f'Window boundaries or image budgets differ: {name}')
+    def order(scores: dict[str, dict[str, Any]]) -> list[str]:
+        return sorted(scores, key=lambda n: (
+            not scores[n]['eligible'], -scores[n]['geometry_score_heuristic'],
+            scores[n]['start_s'], n))
+    lnames, gnames = order(l), order(g)
+    lranks = {n: i + 1 for i, n in enumerate(lnames)}
+    granks = {n: i + 1 for i, n in enumerate(gnames)}
+    rows = []
+    for name in sorted(l, key=lambda n: (l[n]['start_s'], n)):
+        a, b = l[name], g[name]
+        rows.append({
+            'scene': name, 'start_s': a['start_s'], 'stop_s': a['stop_s'],
+            'image_count': a['image_count'],
+            'local_rank': lranks[name], 'global_rank': granks[name],
+            'rank_shift_global_minus_local': granks[name] - lranks[name],
+            'local_eligible': a['eligible'], 'global_eligible': b['eligible'],
+            'local_score': a['geometry_score_heuristic'],
+            'global_score': b['geometry_score_heuristic'],
+            'local_qualified_points': a['qualified_points'],
+            'global_qualified_points': b['qualified_points'],
+            'global_qualified_points_with_outside_obs':
+                b['qualified_points_with_external_observations'],
+            'local_parallax_deg': a['median_parallax_deg'],
+            'global_parallax_deg': b['median_parallax_deg'],
+            'local_reprojection_px': a['median_reproj_error_px'],
+            'global_reprojection_px': b['median_reproj_error_px'],
+            'local_grid_coverage': a['mean_image_grid_coverage'],
+            'global_grid_coverage': b['mean_image_grid_coverage'],
+        })
+    with (args.out / 'scene_comparison.csv').open(
+            'w', newline='', encoding='utf-8') as fh:
+        writer = csv.DictWriter(fh, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    select_l = {r['name'] for r in local['scenes_selected']}
+    select_g = {r['name'] for r in glob['scenes_selected']}
+    k = min(args.top_k, len(lnames))
+    top_l, top_g = set(lnames[:k]), set(gnames[:k])
+    x = np.asarray([lranks[n] for n in l], dtype=float)
+    y = np.asarray([granks[n] for n in l], dtype=float)
+    correlation = float(np.corrcoef(x, y)[0, 1]) if len(l) > 1 else None
+    _write_json(args.out / 'scene_comparison.json', {
+        'schema_version': 1,
+        'kind': 'kitti_gt_sfm_local_vs_global_scene_comparison',
+        'candidate_count': len(l),
+        'local_selected': sorted(select_l), 'global_selected': sorted(select_g),
+        'selected_intersection': sorted(select_l & select_g),
+        'selected_jaccard': len(select_l & select_g) / max(len(select_l | select_g), 1),
+        'top_k': k, 'local_top_k': sorted(top_l), 'global_top_k': sorted(top_g),
+        'top_k_overlap': len(top_l & top_g) / k,
+        'rank_correlation_tie_broken': correlation,
+        'maximum_absolute_rank_shift': max(abs(r['rank_shift_global_minus_local'])
+                                           for r in rows),
+        'candidates': rows,
+        'caveats': [
+            'Global point positions use observations outside candidate windows.',
+            'Equal windows, frame counts and geometric thresholds do not equalize '
+            'feature matching / triangulation information.',
+            'Both methods share the same heuristic, not a calibration metric.',
+            'Two disjoint windows and max_scenes=2 trivially select both, regardless of ranks.',
+            'Tied scores are ordered deterministically by start time and ID.',
+        ],
+    })
+    LOG.info('Compared %d windows: selected Jaccard=%.3f, top-%d overlap=%.3f',
+             len(rows), len(select_l & select_g) / max(len(select_l | select_g), 1),
+             k, len(top_l & top_g) / k)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.ArgumentDefaultsHelpFormatter)
