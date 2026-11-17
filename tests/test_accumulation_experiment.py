@@ -177,7 +177,7 @@ def test_real_backend_pgo_accumulation_cli(tmp_path: Path) -> None:
         folder = out / row['experiment']
         info = json.loads((folder / 'refinement.json').read_text())
         assert info['solver'] == 'spade_calib.lidar.pgo_solver.solve_pgo'
-        assert info['settings']['pairs']['d1_roi'] is False
+        assert info['settings']['pairs']['legacy_roi'] is False
         assert info['iterations'][0]['pair_edges'] >= 1
         assert int(row['registration_pair_edges_first']) >= 1
         assert (folder / 'refined_transforms.npy').exists()

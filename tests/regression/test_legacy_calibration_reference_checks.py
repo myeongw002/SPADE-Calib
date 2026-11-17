@@ -10,8 +10,8 @@ from zipfile import ZipFile
 import numpy as np
 import pytest
 
-SOURCE = Path(__file__).resolve().parents[2] / "scripts" / "reproduce_d1.py"
-SPEC = importlib.util.spec_from_file_location("spade_reproduce_d1", SOURCE)
+SOURCE = Path(__file__).resolve().parents[2] / "scripts" / "reproduce_legacy_calibration.py"
+SPEC = importlib.util.spec_from_file_location("spade_reproduce_legacy_calibration", SOURCE)
 assert SPEC is not None and SPEC.loader is not None
 REPRO = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = REPRO

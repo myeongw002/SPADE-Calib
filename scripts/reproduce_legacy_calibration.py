@@ -358,7 +358,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             report["private_workdir"] = str(directory)
         else:
-            with tempfile.TemporaryDirectory(prefix="spade_d1_repro_") as temporary:
+            with tempfile.TemporaryDirectory(prefix="spade_legacy_repro_") as temporary:
                 report = reproduce(
                     archive_path, methods=args.methods,
                     work_dir=Path(temporary), atol=args.atol,

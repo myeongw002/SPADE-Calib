@@ -31,8 +31,8 @@ class JointSettings:
     pair_cos_normal: float = 0.87
     pair_plane_m: float = 0.15
     irls_scale_m: float = 0.07
-    # Only D1 legacy reproduction uses these bounds and wall exclusion.
-    d1_roi: bool = True
+    # Legacy D1 numerical reproduction uses these fixed bounds/wall exclusion; disable for other scenes.
+    legacy_roi: bool = True
 
     def __post_init__(self) -> None:
         if self.iterations < 1 or self.max_samples_per_scan < self.k_normals or self.k_normals < 4:
@@ -87,7 +87,7 @@ def sample_model(A: NDArray, scan: NDArray, settings: JointSettings):
         if not len(original):
             raise ValueError(f'Scan {s} has no valid LiDAR points')
         p = A[original]
-        if settings.d1_roi:
+        if settings.legacy_roi:
             mask = (np.abs(p[:, 0]) < 22) & (np.abs(p[:, 1]) < 16) & (p[:, 2] > -2) & (p[:, 2] < 5)
             wall = ((p[:, 0] > 10.3) & (p[:, 0] < 14.9)
                     & (p[:, 1] > 4.3) & (p[:, 1] < 9.4)

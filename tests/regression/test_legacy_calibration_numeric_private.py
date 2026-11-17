@@ -8,8 +8,8 @@ from pathlib import Path
 
 import pytest
 
-SOURCE = Path(__file__).resolve().parents[2] / "scripts" / "reproduce_d1.py"
-SPEC = importlib.util.spec_from_file_location("spade_reproduce_d1", SOURCE)
+SOURCE = Path(__file__).resolve().parents[2] / "scripts" / "reproduce_legacy_calibration.py"
+SPEC = importlib.util.spec_from_file_location("spade_reproduce_legacy_calibration", SOURCE)
 assert SPEC is not None and SPEC.loader is not None
 REPRO = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = REPRO
@@ -20,7 +20,7 @@ SPEC.loader.exec_module(REPRO)
     not os.environ.get("SPADE_D1_REPRO_ARCHIVE"),
     reason="SPADE_D1_REPRO_ARCHIVE not set: private D1 archive is not in public CI",
 )
-def test_original_d1_matching_and_calibration(tmp_path: Path) -> None:
+def test_archived_matching_and_calibration(tmp_path: Path) -> None:
     source = Path(os.environ["SPADE_D1_REPRO_ARCHIVE"])
     result = REPRO.reproduce(source, work_dir=tmp_path / "reproduction")
     assert result["status"] == "pass"

@@ -13,7 +13,7 @@ from spade_calib.io.dataset import inspect_dataset, load_dataset_config
     not os.getenv("SPADE_D1_CONFIG"),
     reason="SPADE_D1_CONFIG not set; original D1 data are private",
 )
-def test_recovered_d1_artifact_contract() -> None:
+def test_archived_dataset_artifact_contract() -> None:
     config = load_dataset_config(os.environ["SPADE_D1_CONFIG"])
     report = inspect_dataset(config)
     artifacts = report["artifacts"]

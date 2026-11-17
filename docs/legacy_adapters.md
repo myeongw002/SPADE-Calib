@@ -6,7 +6,7 @@ loading them from ZIP archives into the Git working tree.
 ## Command
 
     pip install -e ".[dev]"
-    spade-calib inspect --config configs/examples/d1.yaml --output outputs/d1_manifest.json
+    spade-calib inspect --config configs/examples/legacy_dataset.yaml --output outputs/d1_manifest.json
 
 Before running, edit the example config to point at an extracted private D1
 inputs directory. The CLI is read-only except for an explicitly provided

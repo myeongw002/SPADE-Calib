@@ -26,7 +26,7 @@ def synthetic(n_per_plane=450):
 @pytest.mark.parametrize('method', ['Joint', 'PGO'])
 def test_refine_without_saved_reference_and_preserve_anchor(method):
     cloud = synthetic()
-    settings = JointSettings(anchor_scan_id=0, d1_roi=False, iterations=3,
+    settings = JointSettings(anchor_scan_id=0, legacy_roi=False, iterations=3,
                              max_samples_per_scan=3000)
     result = (solve_joint(cloud, settings) if method == 'Joint'
               else solve_pgo(cloud, PGOSettings(pairs=settings)))

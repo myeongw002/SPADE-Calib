@@ -1,4 +1,4 @@
-"""Read D1 raw VLP16 scans with exact source-return identity and time offsets."""
+"""Read archived VLP16 XYZIRT scans with exact source-return identity and time offsets."""
 from __future__ import annotations
 import io
 import json
@@ -11,7 +11,7 @@ from numpy.typing import NDArray
 from .trajectory import GlimTrajectory
 
 # Specific historical VLP-16 PCD exported schema: 22 bytes/point.
-D1_POINT_DTYPE = np.dtype([
+LEGACY_XYZIRT_POINT_DTYPE = np.dtype([
     ('x', '<f4'), ('y', '<f4'), ('z', '<f4'), ('intensity', '<f4'),
     ('ring', '<u2'), ('time', '<f4'),
 ])
@@ -79,9 +79,9 @@ def _decode_binary_pcd(raw: bytes, *, scan_id: int, timestamp_ns: int,
             raise ValueError(f'Unexpected PCD {key}: {lines.get(key)}')
     count = int(lines.get('POINTS', '-1'))
     offset = end + len(b'DATA binary\n')
-    if count < 0 or len(raw) - offset != count * D1_POINT_DTYPE.itemsize:
+    if count < 0 or len(raw) - offset != count * LEGACY_XYZIRT_POINT_DTYPE.itemsize:
         raise ValueError('PCD binary payload size does not match POINTS')
-    cloud = np.frombuffer(raw, dtype=D1_POINT_DTYPE, count=count, offset=offset)
+    cloud = np.frombuffer(raw, dtype=LEGACY_XYZIRT_POINT_DTYPE, count=count, offset=offset)
     xyz = np.stack([cloud[k] for k in ('x', 'y', 'z')], axis=-1).astype(np.float64)
     good = np.isfinite(xyz).all(axis=1) & np.isfinite(cloud['intensity'])
     r = np.linalg.norm(xyz[good], axis=1)
@@ -92,9 +92,9 @@ def _decode_binary_pcd(raw: bytes, *, scan_id: int, timestamp_ns: int,
                      intensity=cloud['intensity'][chosen].astype(np.float64))
 
 
-def load_d1_scan_zip(path: str | Path, *, min_range_m: float = 0.5,
+def load_legacy_scan_archive(path: str | Path, *, min_range_m: float = 0.5,
                      max_range_m: float = 100.0) -> tuple[list[LidarScan], GlimTrajectory, dict]:
-    """Read the user's D1 'distance' zip, sorted by its manifest scan order.
+    """Read a historical 'distance' archive, sorted by its manifest scan order.
 
     Source-return indices identify positions in each unfiltered raw PCD.
     The archive is data only; executable code and unsafe names are rejected.
@@ -108,10 +108,10 @@ def load_d1_scan_zip(path: str | Path, *, min_range_m: float = 0.5,
         manifest = json.loads(archive.read(prefix + 'manifest.json'))
         entries = manifest.get('scans')
         if not isinstance(entries, list) or not entries:
-            raise ValueError('D1 manifest has no scans')
+            raise ValueError('Legacy manifest has no scans')
         trajectory_name = manifest.get('trajectory_file', 'glim_trajectory.txt')
         if trajectory_name != 'glim_trajectory.txt':
-            raise ValueError('Unexpected trajectory path in D1 manifest')
+            raise ValueError('Unexpected trajectory path in Legacy manifest')
         traj = GlimTrajectory.from_array(np.loadtxt(io.BytesIO(archive.read(prefix + trajectory_name))))
         scans = []
         for i, entry in enumerate(entries):
@@ -125,7 +125,7 @@ def load_d1_scan_zip(path: str | Path, *, min_range_m: float = 0.5,
                               timestamp_ns=stamp, min_range_m=min_range_m,
                               max_range_m=max_range_m))
         if int(manifest.get('scan_count', -1)) != len(scans):
-            raise ValueError('D1 manifest scan count mismatch')
+            raise ValueError('Legacy manifest scan count mismatch')
         if len({s.timestamp_ns for s in scans}) != len(scans):
             raise ValueError('D1 scan timestamps are not unique')
     return scans, traj, manifest
