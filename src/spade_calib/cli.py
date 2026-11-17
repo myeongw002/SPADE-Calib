@@ -77,6 +77,32 @@ def _parser() -> argparse.ArgumentParser:
                             help='KITTI Odometry sequence calib.txt; evaluation only')
     evaluation.add_argument('--camera-index', type=int, choices=range(4), default=2)
     evaluation.add_argument('--output', type=Path)
+    ground = sub.add_parser('refine-ground',
+        help='Compare 3-DoF fixed-R and 6-DoF joint Hand-Eye + Ground constraints')
+    ground.add_argument('--handeye', required=True, type=Path,
+                        help='Saved full-trajectory handeye.json')
+    ground.add_argument('--ground-matches', required=True, type=Path,
+                        help='Verified metric camera/LiDAR ground plane pairs JSON')
+    ground.add_argument('--glim', required=True, type=Path,
+                        help='Same GLIM trajectory used for --handeye')
+    ground.add_argument('--sfm', required=True, type=Path,
+                        help='Same COLMAP/pycolmap camera trajectory used for --handeye')
+    ground.add_argument('--kitti-times', type=Path,
+                        help='KITTI Odometry times.txt: match by frame index')
+    ground.add_argument('--glim-first-frame', type=int, default=0)
+    ground.add_argument('--image-timestamps', type=Path)
+    ground.add_argument('--camera-to-lidar-offset-ns', type=int, default=0)
+    ground.add_argument('--handeye-weight', type=float, default=1.0)
+    ground.add_argument('--ground-weight', type=float, default=1.0)
+    ground.add_argument('--max-translation-delta-m', type=float, default=2.0)
+    ground.add_argument('--max-rotation-delta-deg', type=float, default=10.0)
+    ground.add_argument('--max-initial-normal-angle-deg', type=float, default=45.0)
+    ground.add_argument('--robust-loss', choices=('linear','soft_l1','huber','cauchy'),
+                        default='soft_l1')
+    ground.add_argument('--calib', type=Path,
+                        help='Optional KITTI GT calib.txt, evaluation ONLY after fitting')
+    ground.add_argument('--camera-index', type=int, choices=range(4), default=2)
+    ground.add_argument('--output', required=True, type=Path)
     kitti = sub.add_parser('accumulate-kitti',
                            help='Rigid accumulation of KITTI .bin scans using indexed GLIM Odom poses')
     kitti.add_argument('--lidar-dir', type=Path, required=True)
@@ -169,6 +195,9 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == 'handeye':
             from spade_calib.handeye.cli import run_handeye
             return run_handeye(args)
+        elif args.command == 'refine-ground':
+            from spade_calib.calibration.cli import run_ground_refinement
+            return run_ground_refinement(args)
         elif args.command == 'accumulate-kitti':
             import os
             import tempfile
