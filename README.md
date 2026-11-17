@@ -265,6 +265,24 @@ A single ground plane does not constrain its tangent-plane translation.
 See [Ground refinement](docs/ground_refinement.md) for the input schema,
 parameterization, observability limits and scientific caveats.
 
+## Metric Ground extraction and Camera-guided correspondence
+
+The `spade-calib prepare-ground` command ports archived ROI-free image Plane
+Extraction and guided LiDAR matching into reusable, KITTI frame-checked modules.
+It takes **Camera-aligned metric optical-Z depth** (not raw DA2),
+`accumulate-kitti` NPZ, independent Camera intrinsics, and the initial
+`handeye.json`. It outputs **provisional**, diagnostic-rich
+`ground_matches.json`, not automatically verified ground truth.
+
+Add `--run-refinement --allow-provisional --glim ... --sfm ...` to
+run both fixed-R Translation 3-DoF and joint 6-DoF Ground+Hand-Eye
+optimization on the same automatically detected ground candidate.
+`--calib` enables evaluation only, never matching or optimization.
+
+The current pipeline **does not calculate metric depth from raw DA2** and
+requires an externally generated, validated metric-depth array in the
+target Camera frame. See [Metric Ground extraction & matching](docs/ground_extraction_pipeline.md).
+
 ## Intended Pipeline
 
     SfM + GLIM -> Hand–Eye Initialization
