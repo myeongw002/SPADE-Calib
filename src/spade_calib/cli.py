@@ -103,6 +103,50 @@ def _parser() -> argparse.ArgumentParser:
                         help='Optional KITTI GT calib.txt, evaluation ONLY after fitting')
     ground.add_argument('--camera-index', type=int, choices=range(4), default=2)
     ground.add_argument('--output', required=True, type=Path)
+    prepare_ground = sub.add_parser('prepare-ground',
+        help='Extract metric Camera/LiDAR Ground match and optionally run 3/6-DoF refinement')
+    prepare_ground.add_argument('--handeye', type=Path, required=True)
+    prepare_ground.add_argument('--cloud', type=Path, required=True,
+                                help='accumulate-kitti NPZ in target-frame LiDAR axes')
+    prepare_ground.add_argument('--metric-depth', type=Path, required=True,
+                                help='Camera-aligned metric optical-Z depth .npy (NOT raw DA2)')
+    prepare_ground.add_argument('--camera-json', type=Path, required=True,
+                                help='K, distortion, image width/height, depth_type=camera_z_m')
+    prepare_ground.add_argument('--frame-index', type=int, required=True,
+                                help='Target KITTI LiDAR frame')
+    prepare_ground.add_argument('--depth-frame-index', type=int, required=True,
+                                help='KITTI Camera image index used for the metric depth')
+    prepare_ground.add_argument('--kitti-times', type=Path, required=True,
+                                help='KITTI Odometry times.txt to verify accumulation timestamp')
+    prepare_ground.add_argument('--output-dir', type=Path, required=True)
+    prepare_ground.add_argument('--processing-width', type=int, default=320)
+    prepare_ground.add_argument('--processing-height', type=int, default=180)
+    prepare_ground.add_argument('--min-depth-m', type=float, default=1.)
+    prepare_ground.add_argument('--max-depth-m', type=float, default=55.)
+    prepare_ground.add_argument('--max-lidar-points', type=int, default=60000)
+    prepare_ground.add_argument('--lidar-ransac-iterations', type=int, default=420)
+    prepare_ground.add_argument('--min-lidar-inliers', type=int, default=180)
+    prepare_ground.add_argument('--min-ground-height-m', type=float, default=.35)
+    prepare_ground.add_argument('--max-ground-height-m', type=float, default=3.5)
+    prepare_ground.add_argument('--mask-dilation-px', type=int, default=10)
+    prepare_ground.add_argument('--min-guided-points', type=int, default=35)
+    prepare_ground.add_argument('--run-refinement', action='store_true',
+                                help='Use auto-generated PROVISIONAL matches in 3/6-DoF optimizer')
+    prepare_ground.add_argument('--allow-provisional', action='store_true',
+                                help='Explicitly acknowledge generated matches are not verified GT')
+    prepare_ground.add_argument('--glim', type=Path)
+    prepare_ground.add_argument('--sfm', type=Path)
+    prepare_ground.add_argument('--glim-first-frame', type=int, default=0)
+    prepare_ground.add_argument('--calib', type=Path,
+                                help='Optional KITTI GT calib.txt: evaluation AFTER fitting only')
+    prepare_ground.add_argument('--camera-index', type=int, choices=range(4), default=2)
+    prepare_ground.add_argument('--handeye-weight', type=float, default=1.)
+    prepare_ground.add_argument('--ground-weight', type=float, default=1.)
+    prepare_ground.add_argument('--max-translation-delta-m', type=float, default=2.)
+    prepare_ground.add_argument('--max-rotation-delta-deg', type=float, default=10.)
+    prepare_ground.add_argument('--max-initial-normal-angle-deg', type=float, default=45.)
+    prepare_ground.add_argument('--robust-loss', choices=('linear','soft_l1','huber','cauchy'),
+                                default='soft_l1')
     kitti = sub.add_parser('accumulate-kitti',
                            help='Rigid accumulation of KITTI .bin scans using indexed GLIM Odom poses')
     kitti.add_argument('--lidar-dir', type=Path, required=True)
@@ -198,6 +242,9 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == 'refine-ground':
             from spade_calib.calibration.cli import run_ground_refinement
             return run_ground_refinement(args)
+        elif args.command == 'prepare-ground':
+            from spade_calib.calibration.ground_pipeline import run_prepare_ground
+            return run_prepare_ground(args)
         elif args.command == 'accumulate-kitti':
             import os
             import tempfile
