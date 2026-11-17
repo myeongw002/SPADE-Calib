@@ -239,6 +239,32 @@ Old script paths and Python symbols were removed without compatibility aliases.
 Update external callers. Dataset labels and archival names intentionally retain
 D1 when required for scientific provenance.
 
+## Hand-Eye + Ground Plane refinement (3-DoF and 6-DoF)
+
+The new `spade-calib refine-ground` command **compares** two fixed-SfM-scale
+Ground-augmented Hand-Eye models on the **same** inputs: fixed Rotation with
+translation-only optimization (3-DoF), and joint Rotation+Translation
+optimization (6-DoF). The Hand-Eye motion residual remains active in both.
+
+~~~bash
+spade-calib refine-ground \
+  --handeye outputs/handeye.json \
+  --glim /data/kitti07/odom_lidar.txt \
+  --sfm /data/kitti07/camera_trajectory_tum.txt \
+  --kitti-times /data/kitti07/times.txt \
+  --ground-matches /data/kitti07/verified_ground_pairs.json \
+  --calib /data/kitti07/calib.txt --camera-index 2 \
+  --output outputs/ground_refinement.json
+~~~
+
+**Required:** independently measured metric Camera/LiDAR ground-plane
+correspondences, in a strict JSON format. Camera metric ground extraction
+and automatic correspondence generation are **not implemented**. KITTI
+`calib.txt` is for GT evaluation only and never passed into the optimizer.
+A single ground plane does not constrain its tangent-plane translation.
+See [Ground refinement](docs/ground_refinement.md) for the input schema,
+parameterization, observability limits and scientific caveats.
+
 ## Intended Pipeline
 
     SfM + GLIM -> Hand–Eye Initialization
