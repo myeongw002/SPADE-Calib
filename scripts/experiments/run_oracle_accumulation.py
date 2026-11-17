@@ -296,7 +296,7 @@ def main(argv: list[str] | None = None) -> int:
         # Joint and PGO MUST start from the same unrefined GLIM cloud.
         # Neither solver is initialized using the other solver's output.
         for method in methods:
-            pair_cfg = JointSettings(anchor_scan_id=anchor, d1_roi=False,
+            pair_cfg = JointSettings(anchor_scan_id=anchor, legacy_roi=False,
                                      iterations=args.refine_iterations,
                                      voxel_m=args.refine_voxel_m,
                                      max_samples_per_scan=args.refine_max_samples,

@@ -19,7 +19,7 @@ For numeric/vision dependencies also install with pip install -e '.[research,dev
 
 ## Inspect D1 inputs
 
-Extract private data **outside** the repository. Copy configs/examples/d1.yaml and set dataset.root to the extracted inputs directory.
+Extract private data **outside** the repository. Copy configs/examples/legacy_dataset.yaml and set dataset.root to the extracted inputs directory.
 
 ~~~bash
 spade-calib inspect --config path/to/local-d1.yaml \
@@ -33,14 +33,14 @@ This inspects point clouds, SfM/DA2, camera plane files and Hand–Eye inputs. I
 With an authorized **trusted original** 2026-11-07 experiment ZIP:
 
 ~~~bash
-python scripts/reproduce_d1.py \
+python scripts/reproduce_legacy_calibration.py \
   --archive /private/COMPA_D1_RefinedPCD_CameraGuided_Calibration_20261107.zip \
   --output outputs/d1_reproduction_report.json
 ~~~
 
 Original legacy scripts are executed in a temporary private directory and all Matching, support indices, results CSV, and 4-fold Extrinsic matrices are compared to their saved archival references. This tool **executes included Python source: do not use untrusted archives**.
 
-Local results: **Joint 6 matches / 44 Calibration rows; PGO 5 matches / 40 Calibration rows. All numeric differences 0.0.** The private ZIP is not included in GitHub; public CI uses synthetic comparison tests. See docs/d1_reproduction.md.
+Local results: **Joint 6 matches / 44 Calibration rows; PGO 5 matches / 40 Calibration rows. All numeric differences 0.0.** The private ZIP is not included in GitHub; public CI uses synthetic comparison tests. See docs/legacy_calibration_reproduction.md.
 
 
 ## D1 LiDAR Refinement (phase 4 — selected methods only)
@@ -49,8 +49,8 @@ Local results: **Joint 6 matches / 44 Calibration rows; PGO 5 matches / 40 Calib
 
 ~~~bash
 pip install -e '.[research,dev]'
-python scripts/prepare_d1_refinement.py --raw-archive /private/d1_distance.zip --method Joint --output outputs/d1_joint
-python scripts/prepare_d1_refinement.py --raw-archive /private/d1_distance.zip --method PGO --output outputs/d1_pgo
+python scripts/prepare_legacy_lidar_refinement.py --raw-archive /private/d1_distance.zip --method Joint --output outputs/d1_joint
+python scripts/prepare_legacy_lidar_refinement.py --raw-archive /private/d1_distance.zip --method PGO --output outputs/d1_pgo
 ~~~
 
 Add `--reference-archive /private/d1_calibration.zip` for numerical regression only: reference point clouds are compared **after** optimization and are never passed into either solver.
@@ -219,6 +219,26 @@ See [experiment guide](docs/experiments/kitti07_accumulation.md). The provided
 KITTI 07 data are **64-beam**, and detected planes are candidates rather than
 verified camera-LiDAR correspondences.
 
+## Legacy experiment naming migration
+
+Legacy reproduction/refinement code identifiers now use format-oriented names.
+The original D1 data schema, fixed ROI, numeric comparisons and archive labels
+remain unchanged. The new names do not support arbitrary PCD or ZIP formats.
+
+- `scripts/reproduce_legacy_calibration.py` replaces `scripts/reproduce_d1.py`.
+- `scripts/prepare_legacy_lidar_refinement.py` replaces `scripts/prepare_d1_refinement.py`.
+- `spade_calib.lidar.load_legacy_scan_archive` replaces `load_d1_scan_zip`.
+- `JointSettings.legacy_roi` replaces `JointSettings.d1_roi`.
+  It still defaults to `True` to preserve historical reference results;
+  disable it explicitly for different scenes. The refiner flag is
+  `--disable-legacy-roi` (formerly `--disable-d1-roi`).
+- Refiner outputs: `{method}_refined.npz`, `{method}_solved_poses.npz`,
+  `{method}_report.json`; report key: `legacy_roi_enabled`.
+
+Old script paths and Python symbols were removed without compatibility aliases.
+Update external callers. Dataset labels and archival names intentionally retain
+D1 when required for scientific provenance.
+
 ## Intended Pipeline
 
     SfM + GLIM -> Hand–Eye Initialization
@@ -231,7 +251,7 @@ The archived 2026-11-07 baseline is **plane-only**. The newer scene-wide + plane
 
 ## Documentation
 
-- docs/d1_reproduction.md — Verified local reproduction and limitations
+- docs/legacy_calibration_reproduction.md — Verified local reproduction and limitations
 - docs/lidar_refinement.md — Selected LiDAR refinement solvers, reproduction and limits
 - docs/recording_index.md — Whole-recording dataset metadata and timestamp mapping
 - docs/scene_selection.md — Trajectory observability proxy, selection and failure gates

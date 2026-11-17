@@ -14,14 +14,14 @@ Historical Joint/PGO source was *newly recovered*. These solvers are **not GLIM'
 
 ~~~bash
 python -m pip install -e '.[research,dev]'
-python scripts/prepare_d1_refinement.py --raw-archive /private/rosbag2_2026_10_08-15_05_54_1791439637016960512_distance.zip --method Joint --output outputs/d1_joint
-python scripts/prepare_d1_refinement.py --raw-archive /private/rosbag2_2026_10_08-15_05_54_1791439637016960512_distance.zip --method PGO --output outputs/d1_pgo
+python scripts/prepare_legacy_lidar_refinement.py --raw-archive /private/rosbag2_2026_10_08-15_05_54_1791439637016960512_distance.zip --method Joint --output outputs/d1_joint
+python scripts/prepare_legacy_lidar_refinement.py --raw-archive /private/rosbag2_2026_10_08-15_05_54_1791439637016960512_distance.zip --method PGO --output outputs/d1_pgo
 ~~~
 
 Optional numerical regression comparison is performed **after** solving, never as solver input:
 
 ~~~bash
-python scripts/prepare_d1_refinement.py --raw-archive /private/d1_distance.zip --reference-archive /private/COMPA_D1_RefinedPCD_CameraGuided_Calibration_20261107.zip --method Joint --output outputs/d1_joint_checked
+python scripts/prepare_legacy_lidar_refinement.py --raw-archive /private/d1_distance.zip --reference-archive /private/COMPA_D1_RefinedPCD_CameraGuided_Calibration_20261107.zip --method Joint --output outputs/d1_joint_checked
 ~~~
 
 Optional `--ghost-filter` rejects accumulated source returns that lie in current target-scan free space; **OFF by default**. Point IDs and scan IDs survive in output NPZ. The filter does not label or remove all real-world ghost points.
@@ -43,7 +43,7 @@ The exact original numeric result is **not bitwise identical**. The 0.557 mm PGO
 2. Joint: voxel-sample points, estimate target normals with 24-neighbor PCA, match 22 neighboring/reference scan pairs with normal cosine and distance gates, solve 54 correction parameters (10 scans, fixed scan 5) by robust point-to-plane linearized IRLS with Tikhonov and adjacent-scan smoothness, 5 outer iterations.
 3. PGO: pairwise robust bounded 6-DoF least squares on **frozen** point-to-plane correspondences; solve relative-pose graph with bounded robust confidence and weak priors; apply one corrected pose per scan.
 4. `T_refined_lidar_from_deskewed_lidar` is stored in target-LiDAR coordinates, with camera extrinsic optimization occurring later. The optimized D1 data is not obtained by post-hoc Kabsch fitting to a known refined output.
-5. D1 training excludes a historical wall ROI `[10.3,14.9] x [4.3,9.4] x [-1.2,4.6]` and crops the scan to an additional D1-specific region. This is a documented *experiment setup*, not generally valid Calibration logic. `--disable-d1-roi` changes this setup for exploratory scenes.
+5. D1 training excludes a historical wall ROI `[10.3,14.9] x [4.3,9.4] x [-1.2,4.6]` and crops the scan to an additional D1-specific region. This is a documented *experiment setup*, not generally valid Calibration logic. `--disable-legacy-roi` changes this setup for exploratory scenes.
 
 ## Limits / remaining gates
 

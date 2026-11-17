@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from spade_calib.lidar import (GlimTrajectory, LidarScan, accumulate_glim,
                                 AccumulatedCloud, FreeSpaceSettings, target_free_space_mask,
-                                filter_cloud, load_d1_scan_zip)
+                                filter_cloud, load_legacy_scan_archive)
 
 
 def motion_trajectory():
@@ -86,8 +86,8 @@ def test_free_space_target_needed_and_no_cross_frame_guess():
 
 @pytest.mark.skipif(not os.getenv('SPADE_D1_RAW_ZIP') or not os.getenv('SPADE_D1_A_NPZ'),
                     reason='D1 original raw ZIP and reference A point cloud not configured')
-def test_d1_original_a_numeric_regression():
-    scans,t,m=load_d1_scan_zip(os.environ['SPADE_D1_RAW_ZIP'])
+def test_archived_original_accumulation_numeric_regression():
+    scans,t,m=load_legacy_scan_archive(os.environ['SPADE_D1_RAW_ZIP'])
     a=accumulate_glim(scans,t,target_timestamp_ns=m['lidar_anchor_timestamp_ns'])
     with np.load(os.environ['SPADE_D1_A_NPZ'],allow_pickle=False) as original:
         expected=original['xyz']

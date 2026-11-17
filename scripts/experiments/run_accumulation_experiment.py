@@ -571,7 +571,7 @@ def main(argv: list[str] | None = None) -> int:
             refine_info: list[dict[str, Any]] = []
             datasets = [('initial', raw.xyz, raw.scan_id)]
             if args.refiner in ('joint', 'pgo'):
-                cfg = JointSettings(anchor_scan_id=anchor_local, d1_roi=False,
+                cfg = JointSettings(anchor_scan_id=anchor_local, legacy_roi=False,
                                     iterations=args.refine_iterations,
                                     voxel_m=args.refine_voxel_m,
                                     max_samples_per_scan=args.refine_max_samples,

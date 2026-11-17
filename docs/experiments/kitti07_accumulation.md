@@ -10,7 +10,7 @@ KITTI Odometry Sequence 07에서 **Fixed ±N Frames**와 **Fixed Euclidean Dista
 KITTI frame selection (target fixed)
   -> GLIM T_world_lidar row-index association
   -> SPADE-Calib existing accumulate_glim(mode='rigid')
-  -> SPADE-Calib existing solve_joint(d1_roi=False)
+  -> SPADE-Calib existing solve_joint(legacy_roi=False)
   -> accumulated PLY / plane RANSAC / quality diagnostics
 ```
 

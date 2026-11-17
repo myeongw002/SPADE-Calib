@@ -18,7 +18,7 @@ The original ZIP is intentionally **not published**. Only run trusted research a
 
 ~~~bash
 python -m pip install -e '.[research,dev]'
-python scripts/reproduce_d1.py \
+python scripts/reproduce_legacy_calibration.py \
   --archive /private/COMPA_D1_RefinedPCD_CameraGuided_Calibration_20261107.zip \
   --output outputs/d1_reproduction_report.json
 ~~~
@@ -79,7 +79,7 @@ Synthetic comparator tests run on public GitHub Actions. Private numerical D1 re
 
 ~~~bash
 SPADE_D1_REPRO_ARCHIVE=/private/original.zip \
-  pytest -q tests/regression/test_d1_numeric_private.py
+  pytest -q tests/regression/test_legacy_calibration_numeric_private.py
 ~~~
 
 The generated JSON contains counts, array differences, versions and the input SHA, not raw image or point records.

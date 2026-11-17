@@ -1,5 +1,5 @@
 # Historical baseline metadata. NOT an executable optimization configuration.
-# scripts/reproduce_d1.py runs unmodified private original scripts.
+# scripts/reproduce_legacy_calibration.py runs unmodified private original scripts.
 experiment:
   name: d1_refined_camera_guided_plane_only_20261107
   phase: baseline_reproduction
