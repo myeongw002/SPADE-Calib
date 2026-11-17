@@ -103,6 +103,38 @@ def _parser() -> argparse.ArgumentParser:
                         help='Optional KITTI GT calib.txt, evaluation ONLY after fitting')
     ground.add_argument('--camera-index', type=int, choices=range(4), default=2)
     ground.add_argument('--output', required=True, type=Path)
+    da2 = sub.add_parser('infer-depth',
+        help='Run official Depth Anything V2 relative model; preserve raw float32 HxW')
+    da2.add_argument('--image', type=Path, required=True)
+    da2.add_argument('--checkpoint', type=Path, required=True)
+    da2.add_argument('--da2-repo', type=Path,
+                     help='Trusted clone of official Depth-Anything-V2 Python source')
+    da2.add_argument('--encoder', choices=('vits','vitb','vitl','vitg'), default='vitl')
+    da2.add_argument('--input-size', type=int, default=518)
+    da2.add_argument('--device', choices=('auto','cpu','cuda','mps'), default='auto')
+    da2.add_argument('--output', type=Path, required=True,
+                     help='Raw relative inverse-depth proxy .npy; NOT metric Camera Z')
+
+    align = sub.add_parser('align-depth',
+        help='Align DA2 relative inverse-depth to SfM Camera Z using training anchors')
+    align.add_argument('--relative-depth', type=Path, required=True)
+    align.add_argument('--handeye', type=Path, required=True,
+                       help='Saved Hand-Eye report whose SfM scale is metric')
+    anchor_source = align.add_mutually_exclusive_group(required=True)
+    anchor_source.add_argument('--anchors', type=Path,
+                              help='Precomputed SfM metric anchor NPZ')
+    anchor_source.add_argument('--colmap-model', type=Path,
+                              help='Original sparse COLMAP reconstruction with images/points3D')
+    align.add_argument('--image-name', type=str,
+                       help='Target Camera image filename in COLMAP model')
+    align.add_argument('--camera-json', type=Path,
+                       help='CameraGeometry JSON with same K/rectification as COLMAP/image')
+    align.add_argument('--max-reprojection-error-px', type=float, default=3.)
+    align.add_argument('--min-train-anchors', type=int, default=40)
+    align.add_argument('--min-holdout-anchors', type=int, default=10)
+    align.add_argument('--max-holdout-median-relative-error', type=float, default=.30)
+    align.add_argument('--output', type=Path, required=True,
+                       help='Metric optical-Z depth .npy for prepare-ground')
     prepare_ground = sub.add_parser('prepare-ground',
         help='Extract metric Camera/LiDAR Ground match and optionally run 3/6-DoF refinement')
     prepare_ground.add_argument('--handeye', type=Path, required=True)
@@ -242,6 +274,12 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == 'refine-ground':
             from spade_calib.calibration.cli import run_ground_refinement
             return run_ground_refinement(args)
+        elif args.command == 'infer-depth':
+            from spade_calib.camera.depth_cli import run_infer_depth
+            return run_infer_depth(args)
+        elif args.command == 'align-depth':
+            from spade_calib.camera.depth_cli import run_align_depth
+            return run_align_depth(args)
         elif args.command == 'prepare-ground':
             from spade_calib.calibration.ground_pipeline import run_prepare_ground
             return run_prepare_ground(args)

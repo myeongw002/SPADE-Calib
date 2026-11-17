@@ -20,6 +20,12 @@ research = [
     "matplotlib>=3.7",
     "pandas>=2.0",
 ]
+depth = [
+    "torch>=2.7",
+    "torchvision>=0.22",
+    "timm>=0.9",
+    "einops>=0.7",
+]
 dev = [
     "pytest>=8",
     "ruff>=0.6",

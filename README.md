@@ -265,6 +265,24 @@ A single ground plane does not constrain its tangent-plane translation.
 See [Ground refinement](docs/ground_refinement.md) for the input schema,
 parameterization, observability limits and scientific caveats.
 
+## DA2 Inference and SfM Metric Depth (venv; no Docker)
+
+SPADE-Calib now offers two separate commands:
+- `spade-calib infer-depth` loads an explicit official Depth Anything V2
+  relative checkpoint, runs CPU/CUDA inference, and saves the **raw relative
+  inverse-depth proxy** as float32 NPY with checkpoint SHA256 provenance.
+- `spade-calib align-depth` derives metric Camera-Z SfM anchors from the
+  actual COLMAP sparse images/points3D reconstruction (or uses an audited
+  anchor NPZ), applies Hand-Eye's SfM-to-metric scale and robustly fits
+  `1/Z = a*q + b` with **spatial heldout SfM validation**.
+
+The resulting metric optical-Z NPY is used by existing
+`spade-calib prepare-ground --metric-depth`. Standard relative DA2
+is **not metric** without this fitting. Source+checkpoints remain local
+and are not committed. See
+[DA2 + SfM Metric Depth Guide](docs/da2_metric_depth.md) for venv
+installation, full CLI examples and research limitations.
+
 ## Metric Ground extraction and Camera-guided correspondence
 
 The `spade-calib prepare-ground` command ports archived ROI-free image Plane
