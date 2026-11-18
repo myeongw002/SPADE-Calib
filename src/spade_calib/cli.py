@@ -193,7 +193,10 @@ def _parser() -> argparse.ArgumentParser:
     sfmp.add_argument('--max-reprojection-error-px', type=float, default=3.0)
     sfmp.add_argument('--min-track-length', type=int, default=2)
     sfmp.add_argument('--voxel-m', type=float, default=0.18)
-    sfmp.add_argument('--max-lidar-points', type=int, default=30000)
+    sfmp.add_argument('--max-lidar-points', type=int, default=0,
+                      help='Optional voxel-point cap; 0 (default) disables random sampling')
+    sfmp.add_argument('--voxel-only-refinement', action='store_true',
+                      help='Ablation: fit and match planes using voxel representatives only')
     sfmp.add_argument('--max-planes', type=int, default=8)
     sfmp.add_argument('--ransac-iterations', type=int, default=180)
     sfmp.add_argument('--plane-threshold-m', type=float, default=0.14)

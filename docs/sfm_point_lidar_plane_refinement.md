@@ -155,3 +155,56 @@ matches are likely incorrect. The GT-based checks were performed only after
 matching as diagnostics, not to choose plane proposals or optimize extrinsics.
 The local orientation tests reject known wall-free clouds and compare a
 synthetic ground-dominated scene against the old strategy.
+
+## Full-resolution patch refit (default after orientation-aware extraction)
+
+The default `prepare-sfm-planes` pipeline now **does not randomly cap the
+voxel-representative cloud at 30,000 points**. It searches every occupied
+0.18m voxel, then recovers original accumulated LiDAR returns from the
+**finite connected support voxels of each accepted proposal**. The normal,
+offset, RMSE, scan provenance, and finite-support nearest-neighbor queries
+are computed on those original raw points after a two-pass residual trim.
+The method deliberately does *not* find all points near the infinite plane,
+as that could join unrelated, disconnected coplanar surfaces.
+
+- `--max-lidar-points 0` (default): all voxels for candidate detection.
+- `--voxel-m 0.18`: 3D voxel grid resolution for candidate detection.
+- `--voxel-only-refinement`: disable full-resolution refitting for an ablation.
+- `--max-lidar-points 30000 --voxel-only-refinement`: approximate the
+  previous 30,000-point candidate search and voxel-only fitting baseline.
+- `--no-orientation-aware`: optional separate orientation-proposal ablation.
+
+Example (run with the same original COLMAP model, Hand-Eye, and accumulated
+KITTI cloud as before):
+
+```bash
+spade-calib prepare-sfm-planes \
+  --handeye outputs/kitti07_ground/handeye.json \
+  --colmap-model /path/to/colmap/sparse/0 \
+  --image-name 000105.png --frame-index 105 \
+  --camera-json outputs/kitti07_ground/camera2_intrinsics.json \
+  --cloud outputs/kitti07_ground/accumulated_000105.npz \
+  --kitti-times /path/to/KITTI/07/times.txt \
+  --max-planes 16 \
+  --output outputs/kitti07_ground/sfm_plane_matches_105_fullres.npz
+```
+
+**Reproducibility:** `patch_settings` in the JSON report now includes
+`max_sampled_points: 0` and `refine_with_full_points: true`. The
+`patch_extraction` report exposes `voxel_points`, `sampled_points`,
+`random_sampling_applied`, `range_filtered_points`, and per-patch raw
+support counts. The per-patch `point_count` refers to the original raw
+support, not the voxel count. Patch IDs from previous results need not match
+IDs from the new extractor; rerun matching and refinement together.
+
+**Measured local KITTI07/105 diagnostic:** 1,305,598 original points,
+1,303,103 valid range points, 76,477 occupied 0.18m voxels, zero random
+sampling, 16 extracted plane patches. Ground patch 0 had 331,433 original
+support points versus 6,570 points in the old 30k-cap voxel fit. Extractor
+wall-clock times: 2.92s new vs 2.07s prior (this machine only).
+A preliminary same-anchor matching check produced 448 provisional matches
+across 4 patches vs 432 across 5 patches in the previous run. Normal rank
+proxy was 3 in both. **These numbers do not establish matching correctness
+or improved extrinsic calibration.** Full joint real-data evaluation is
+separate from extraction; dense raw points share GLIM pose/scan errors and
+are not statistically independent measurements.

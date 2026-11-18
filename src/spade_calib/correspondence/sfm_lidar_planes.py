@@ -21,7 +21,9 @@ class PatchSettings:
     voxel_size_m: float = 0.18
     min_range_m: float = 1.0
     max_range_m: float = 65.0
-    max_sampled_points: int = 30000
+    # 0 uses every voxel representative. A positive cap is an optional ablation.
+    max_sampled_points: int = 0
+    refine_with_full_points: bool = True
     max_planes: int = 8
     ransac_iterations: int = 180
     distance_threshold_m: float = 0.14
@@ -182,7 +184,8 @@ def extract_lidar_patches(xyz_lidar: NDArray, scan_id: NDArray | None = None,
     if (cfg.voxel_size_m <= 0 or cfg.distance_threshold_m <= 0 or
             cfg.connectivity_radius_m <= 0 or cfg.min_inliers < 3 or
             cfg.max_planes < 1 or cfg.ransac_iterations < 1 or
-            cfg.max_sampled_points < cfg.min_inliers or
+            cfg.max_sampled_points < 0 or
+            (0 < cfg.max_sampled_points < cfg.min_inliers) or
             not 0 < cfg.min_width_ratio < 1 or
             cfg.max_range_m <= cfg.min_range_m or cfg.min_range_m < 0 or
             cfg.local_normal_neighbors < 4 or
@@ -202,13 +205,55 @@ def extract_lidar_patches(xyz_lidar: NDArray, scan_id: NDArray | None = None,
     selected = np.flatnonzero((lengths >= cfg.min_range_m) & (lengths <= cfg.max_range_m))
     if len(selected) < cfg.min_inliers:
         return [], {'reason': 'too_few_points', 'sampled_points': len(selected)}
-    cells = np.floor(xyz[selected]/cfg.voxel_size_m).astype(np.int64)
-    _, unique = np.unique(cells, axis=0, return_index=True)
-    selected = selected[np.sort(unique)]
+    # Preserve a raw point -> voxel mapping for finite-patch refinement.
+    range_indices = selected
+    cells = np.floor(xyz[range_indices] / cfg.voxel_size_m).astype(np.int64)
+    _, first, inverse = np.unique(
+        cells, axis=0, return_index=True, return_inverse=True)
+    order_first = np.argsort(first)
+    reorder = np.empty(len(first), dtype=np.int64)
+    reorder[order_first] = np.arange(len(first))
+    inverse = reorder[inverse]
+    voxel_reps = range_indices[first[order_first]]
+    voxel_count = len(voxel_reps)
     rng = np.random.default_rng(cfg.random_seed)
-    if len(selected) > cfg.max_sampled_points:
-        selected = np.sort(rng.choice(selected, cfg.max_sampled_points, replace=False))
+    sampled = np.arange(voxel_count, dtype=np.int64)
+    if cfg.max_sampled_points > 0 and voxel_count > cfg.max_sampled_points:
+        sampled = np.sort(rng.choice(
+            sampled, cfg.max_sampled_points, replace=False))
+    selected = voxel_reps[sampled]
     points = xyz[selected]
+
+    # Build compact voxel -> original return indices only when refining on
+    # the full accumulated cloud. Sorting once avoids one global radius
+    # search for every candidate plane, and preserves finite patch support.
+    if cfg.refine_with_full_points:
+        sorted_raw = np.argsort(inverse, kind='stable')
+        counts = np.bincount(inverse, minlength=voxel_count)
+        starts = np.r_[0, np.cumsum(counts)]
+
+    def full_resolution_refit(chosen: NDArray, normal: NDArray, offset: float):
+        if not cfg.refine_with_full_points:
+            return points[chosen].copy(), normal, offset, None
+        voxel_ids = sampled[chosen]
+        parts = [sorted_raw[starts[v]:starts[v+1]] for v in voxel_ids]
+        if not parts:
+            return None
+        raw_ids = range_indices[np.concatenate(parts)]
+        raw_points = xyz[raw_ids]
+        # Mixed surface voxels are possible: trim by geometric distance
+        # before and after raw-point refitting.
+        keep = np.abs(raw_points @ normal + offset) <= cfg.distance_threshold_m
+        for _ in range(2):
+            if np.count_nonzero(keep) < cfg.min_inliers:
+                return None
+            normal, offset, _, _ = _fit_plane(raw_points[keep])
+            keep = np.abs(raw_points @ normal + offset) <= cfg.distance_threshold_m
+        support = raw_points[keep]
+        normal, offset, rmse, width = _fit_plane(support)
+        if width < cfg.min_width_ratio or rmse > cfg.distance_threshold_m:
+            return None
+        return support, normal, offset, raw_ids[keep]
     # Local normal estimates must not be used as final plane normals.
     local_normals, local_valid = (
         _local_planar_normals(points, cfg) if cfg.orientation_aware
@@ -220,17 +265,29 @@ def extract_lidar_patches(xyz_lidar: NDArray, scan_id: NDArray | None = None,
     cos_diverse = np.cos(np.deg2rad(cfg.diverse_normal_min_angle_deg))
     cos_novel = np.cos(np.deg2rad(cfg.novel_normal_min_angle_deg))
 
-    def store(candidate, stage: str):
+    def store(candidate, stage: str) -> bool:
         nonlocal remaining, dominant_normal
         chosen, normal, offset, rmse = candidate
+        refined = full_resolution_refit(chosen, normal, offset)
+        if refined is None:
+            # Failed raw refit: prevent repeatedly proposing the same patch.
+            remaining = remaining[~np.isin(remaining, chosen)]
+            return False
+        support, normal, offset, raw_indices = refined
+        if raw_indices is None:
+            scan_ids = np.unique(sid[selected[chosen]])
+        else:
+            scan_ids = np.unique(sid[raw_indices])
+            rmse = float(np.sqrt(np.mean((support @ normal + offset) ** 2)))
         patches.append(LidarPatch(
             patch_id=len(patches), normal=normal, offset_m=offset,
-            support_xyz_lidar=points[chosen].copy(), rmse_m=rmse,
-            scan_ids=np.unique(sid[selected[chosen]]).astype(np.int64)))
+            support_xyz_lidar=support, rmse_m=rmse,
+            scan_ids=scan_ids.astype(np.int64)))
         remaining = remaining[~np.isin(remaining, chosen)]
         stage_counts[stage] += 1
         if dominant_normal is None:
             dominant_normal = normal.copy()
+        return True
 
     def unrestricted():
         if len(remaining) < cfg.min_inliers:
@@ -297,9 +354,9 @@ def extract_lidar_patches(xyz_lidar: NDArray, scan_id: NDArray | None = None,
                 if candidate is None or abs(candidate[1] @ dominant_normal) > cos_diverse:
                     failed_seed[seed] = True
                     continue
-                store(candidate, 'diverse')
-                found = True
-                break
+                if store(candidate, 'diverse'):
+                    found = True
+                    break
             if not found:
                 # Tested seeds have no robust finite support; block retry.
                 failed_seed[trial_seeds] = True
@@ -316,7 +373,11 @@ def extract_lidar_patches(xyz_lidar: NDArray, scan_id: NDArray | None = None,
             break
         store(candidate, 'fill')
     return patches, {
-        'input_points': len(xyz), 'sampled_points': len(selected),
+        'input_points': len(xyz), 'range_filtered_points': len(range_indices),
+        'voxel_points': voxel_count, 'sampled_points': len(selected),
+        'random_sampling_applied': len(selected) < voxel_count,
+        'refinement_full_resolution': cfg.refine_with_full_points,
+        'full_resolution_patch_points': [len(p.support_xyz_lidar) for p in patches],
         'patch_count': len(patches), 'method': 'orientation_aware_voxel_ransac_connected_refit'
         if cfg.orientation_aware else 'voxel_ransac_connected_refit',
         'dominant_normal': dominant_normal.tolist() if dominant_normal is not None else None,
