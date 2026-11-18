@@ -81,7 +81,7 @@ spade-calib evaluate-kitti-handeye \
 
 ## Matching limits and failure policy
 
-- LiDAR patch extraction: voxel sampling, RANSAC, finite connected support,
+- LiDAR patch extraction: voxel sampling, dominant + orientation-aware local-PCA RANSAC, finite connected support,
   PCA refit, non-collinear surface support. No semantic/dynamic rejection.
 - Initial correspondence: project unscaled SfM Camera XYZ through current
   `s` and `T_camera_lidar` into the target LiDAR frame; use signed plane
@@ -115,3 +115,43 @@ spade-calib evaluate-kitti-handeye \
 - Full real KITTI07 joint-solver accuracy is **not yet measured** here: the
   original GLIM trajectory, full COLMAP sparse tracks and KITTI times.txt
   are not included in the provided data bundle.
+
+## Orientation-aware extraction (updated prototype)
+
+The previous repeated maximum-inlier global RANSAC spent most of the 16 patch
+slots on parallel near-horizontal surfaces. The default extraction now:
+
+1. Fits **one** dominant reference plane with global RANSAC.
+2. Estimates local PCA normals on voxel-sampled LiDAR points; only locally
+   planar seeds generate additional hypotheses.
+3. Prioritizes normals differing at least 25 degrees from the dominant plane,
+   with additional priority for directions novel relative to *all* accepted
+   patches. The orientation rule changes proposal search, **not** the
+   inlier threshold or final validity test.
+4. Accepts only finite connected support, double PCA refit, 2D width and
+   plane RMSE checks. Falls back to unrestricted RANSAC if no novel patches
+   are present. Does **not** invent perpendicular planes.
+
+Defaults may be tuned explicitly:
+
+```bash
+spade-calib prepare-sfm-planes ... \
+  --max-planes 16 \
+  --diverse-normal-min-angle-deg 25 \
+  --novel-normal-min-angle-deg 25
+```
+
+To reproduce the non-orientation-aware baseline, add `--no-orientation-aware`.
+
+**KITTI07 frame 105 local smoke test:** same 1,305,598-point 11-scan cloud;
+30,000 voxel-sampled points; 16 extracted patches. The updated version produced
+15 patches differing by >=25 degrees from its dominant plane (many are
+near-vertical and some oblique). The candidate matcher accepted **432** SfM
+point/plane assignments on **5** patches, with normal rank *proxy* **3**.
+The prior user result had 224 matches on 2 predominantly horizontal patches,
+normal rank proxy 1. These comparisons concern **candidate availability only**:
+no new full real 7-DoF joint result has been obtained, and some automatic
+matches are likely incorrect. The GT-based checks were performed only after
+matching as diagnostics, not to choose plane proposals or optimize extrinsics.
+The local orientation tests reject known wall-free clouds and compare a
+synthetic ground-dominated scene against the old strategy.

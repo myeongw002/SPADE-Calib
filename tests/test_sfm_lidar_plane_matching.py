@@ -129,3 +129,48 @@ def test_rejects_duplicate_feature_matches():
                         np.zeros(4, np.int32), np.array([0, 1, 1, 3]))
     with pytest.raises(ValueError, match='at most one'):
         m.validate()
+
+
+def test_orientation_aware_extraction_keeps_wall_with_ground_dominance():
+    """Legacy max-inlier RANSAC consumes plane slots on parallel ground strips."""
+    rng = np.random.default_rng(22)
+    ground_patches = []
+    for i in range(4):
+        xy = np.array([(x, y) for x in np.linspace(.5, 3.4, 32)
+                       for y in np.linspace(.2, 3.4, 36)])
+        ground_patches.append(np.column_stack((xy[:, 0] + 8*i,
+                                               xy[:, 1] + 1.,
+                                               np.zeros(len(xy)))))
+    uv = np.array([(x, y) for x in np.linspace(-2, 2, 31)
+                   for y in np.linspace(-1.4, 1.4, 23)])
+    vertical_wall = np.column_stack((np.full(len(uv), 6.),
+                                     uv[:, 0] + 1., uv[:, 1] + 1.9))
+    points = np.vstack([*ground_patches, vertical_wall])
+    points += rng.normal(0, .008, points.shape)
+    common = dict(voxel_size_m=.08, max_sampled_points=20000, max_planes=3,
+                  ransac_iterations=150, min_inliers=100,
+                  distance_threshold_m=.06, connectivity_radius_m=.34)
+    standard, _ = extract_lidar_patches(points,
+                                       settings=PatchSettings(**common, orientation_aware=False))
+    diverse, report = extract_lidar_patches(points,
+                                           settings=PatchSettings(**common, orientation_aware=True))
+    assert len(standard) == len(diverse) == 3
+    assert all(abs(float(p.normal @ [0, 0, 1])) > .95 for p in standard)
+    assert any(abs(float(p.normal @ [1, 0, 0])) > .97 for p in diverse)
+    assert report['stage_counts']['diverse'] >= 1
+
+
+def test_orientation_aware_falls_back_when_no_diverse_planes_exist():
+    rng = np.random.default_rng(93)
+    xy = np.array([(x, y) for x in np.linspace(1, 8, 40)
+                   for y in np.linspace(1, 8, 40)])
+    cloud = np.column_stack((xy, np.zeros(len(xy))))
+    cloud += rng.normal(0, .006, cloud.shape)
+    patches, info = extract_lidar_patches(
+        cloud, settings=PatchSettings(
+            voxel_size_m=.1, max_sampled_points=4000, max_planes=3,
+            ransac_iterations=100, min_inliers=100, distance_threshold_m=.05,
+            connectivity_radius_m=.5, orientation_aware=True))
+    assert patches
+    assert all(abs(float(p.normal @ [0, 0, 1])) > .98 for p in patches)
+    assert info['stage_counts']['diverse'] == 0

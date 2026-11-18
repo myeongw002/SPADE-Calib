@@ -199,6 +199,15 @@ def _parser() -> argparse.ArgumentParser:
     sfmp.add_argument('--plane-threshold-m', type=float, default=0.14)
     sfmp.add_argument('--min-plane-inliers', type=int, default=80)
     sfmp.add_argument('--connectivity-radius-m', type=float, default=1.0)
+    sfmp.add_argument('--no-orientation-aware', action='store_true',
+                      help='Ablation: disable local-PCA orientation-diverse plane proposals')
+    sfmp.add_argument('--diverse-normal-min-angle-deg', type=float, default=25.0,
+                      help='Minimum angle from dominant plane normal for diverse proposals')
+    sfmp.add_argument('--novel-normal-min-angle-deg', type=float, default=25.0,
+                      help='Minimum angle from already accepted normals for novel priority')
+    sfmp.add_argument('--local-normal-neighbors', type=int, default=24)
+    sfmp.add_argument('--local-normal-max-rmse-m', type=float, default=0.10)
+    sfmp.add_argument('--diverse-hypotheses-per-patch', type=int, default=120)
     sfmp.add_argument('--max-normal-distance-m', type=float, default=1.5)
     sfmp.add_argument('--max-support-distance-m', type=float, default=2.5)
     sfmp.add_argument('--min-matches-per-patch', type=int, default=8)
