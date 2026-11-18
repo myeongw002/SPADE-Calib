@@ -179,6 +179,53 @@ def _parser() -> argparse.ArgumentParser:
     prepare_ground.add_argument('--max-initial-normal-angle-deg', type=float, default=45.)
     prepare_ground.add_argument('--robust-loss', choices=('linear','soft_l1','huber','cauchy'),
                                 default='soft_l1')
+    sfmp = sub.add_parser('prepare-sfm-planes',
+        help='Propose COLMAP SfM points -> finite LiDAR plane patches, without DA2')
+    sfmp.add_argument('--handeye', type=Path, required=True)
+    sfmp.add_argument('--colmap-model', type=Path, required=True,
+                      help='Real COLMAP sparse model containing 3D tracks')
+    sfmp.add_argument('--image-name', type=str, required=True)
+    sfmp.add_argument('--frame-index', type=int, required=True)
+    sfmp.add_argument('--camera-json', type=Path, required=True)
+    sfmp.add_argument('--cloud', type=Path, required=True,
+                      help='accumulate-kitti NPZ in the target LiDAR sensor frame')
+    sfmp.add_argument('--kitti-times', type=Path, required=True)
+    sfmp.add_argument('--max-reprojection-error-px', type=float, default=3.0)
+    sfmp.add_argument('--min-track-length', type=int, default=2)
+    sfmp.add_argument('--voxel-m', type=float, default=0.18)
+    sfmp.add_argument('--max-lidar-points', type=int, default=30000)
+    sfmp.add_argument('--max-planes', type=int, default=8)
+    sfmp.add_argument('--ransac-iterations', type=int, default=180)
+    sfmp.add_argument('--plane-threshold-m', type=float, default=0.14)
+    sfmp.add_argument('--min-plane-inliers', type=int, default=80)
+    sfmp.add_argument('--connectivity-radius-m', type=float, default=1.0)
+    sfmp.add_argument('--max-normal-distance-m', type=float, default=1.5)
+    sfmp.add_argument('--max-support-distance-m', type=float, default=2.5)
+    sfmp.add_argument('--min-matches-per-patch', type=int, default=8)
+    sfmp.add_argument('--max-matches-per-patch', type=int, default=200)
+    sfmp.add_argument('--output', type=Path, required=True, help='Provisional match NPZ')
+
+    sfmr = sub.add_parser('refine-sfm-planes',
+        help='Joint 7-DoF Hand-Eye + provisional SfM point / LiDAR plane refinement')
+    sfmr.add_argument('--handeye', type=Path, required=True)
+    sfmr.add_argument('--matches', type=Path, required=True)
+    sfmr.add_argument('--glim', type=Path, required=True)
+    sfmr.add_argument('--sfm', type=Path, required=True,
+                      help='SAME COLMAP sparse model used in prepare-sfm-planes')
+    sfmr.add_argument('--kitti-times', type=Path, required=True)
+    sfmr.add_argument('--glim-first-frame', type=int, default=0)
+    sfmr.add_argument('--sigma-plane-m', type=float, default=0.20)
+    sfmr.add_argument('--motion-weight', type=float, default=1.0)
+    sfmr.add_argument('--plane-weight', type=float, default=1.0)
+    sfmr.add_argument('--max-rotation-delta-deg', type=float, default=10.)
+    sfmr.add_argument('--max-translation-delta-m', type=float, default=2.)
+    sfmr.add_argument('--max-log-scale-delta', type=float, default=0.35)
+    sfmr.add_argument('--robust-loss', choices=('linear','soft_l1','huber','cauchy'),
+                      default='soft_l1')
+    sfmr.add_argument('--allow-provisional', action='store_true',
+                      help='Explicitly accept that automatic matches are NOT ground truth')
+    sfmr.add_argument('--output', type=Path, required=True)
+
     kitti = sub.add_parser('accumulate-kitti',
                            help='Rigid accumulation of KITTI .bin scans using indexed GLIM Odom poses')
     kitti.add_argument('--lidar-dir', type=Path, required=True)
@@ -271,6 +318,12 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == 'handeye':
             from spade_calib.handeye.cli import run_handeye
             return run_handeye(args)
+        elif args.command == 'prepare-sfm-planes':
+            from spade_calib.calibration.sfm_plane_cli import run_prepare_sfm_plane_matches
+            return run_prepare_sfm_plane_matches(args)
+        elif args.command == 'refine-sfm-planes':
+            from spade_calib.calibration.sfm_plane_cli import run_refine_sfm_planes
+            return run_refine_sfm_planes(args)
         elif args.command == 'refine-ground':
             from spade_calib.calibration.cli import run_ground_refinement
             return run_ground_refinement(args)
