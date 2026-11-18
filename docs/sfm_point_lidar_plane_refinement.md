@@ -81,7 +81,7 @@ spade-calib evaluate-kitti-handeye \
 
 ## Matching limits and failure policy
 
-- LiDAR patch extraction: voxel sampling, RANSAC, finite connected support,
+- LiDAR patch extraction: voxel sampling, dominant + orientation-aware local-PCA RANSAC, finite connected support,
   PCA refit, non-collinear surface support. No semantic/dynamic rejection.
 - Initial correspondence: project unscaled SfM Camera XYZ through current
   `s` and `T_camera_lidar` into the target LiDAR frame; use signed plane
@@ -115,3 +115,96 @@ spade-calib evaluate-kitti-handeye \
 - Full real KITTI07 joint-solver accuracy is **not yet measured** here: the
   original GLIM trajectory, full COLMAP sparse tracks and KITTI times.txt
   are not included in the provided data bundle.
+
+## Orientation-aware extraction (updated prototype)
+
+The previous repeated maximum-inlier global RANSAC spent most of the 16 patch
+slots on parallel near-horizontal surfaces. The default extraction now:
+
+1. Fits **one** dominant reference plane with global RANSAC.
+2. Estimates local PCA normals on voxel-sampled LiDAR points; only locally
+   planar seeds generate additional hypotheses.
+3. Prioritizes normals differing at least 25 degrees from the dominant plane,
+   with additional priority for directions novel relative to *all* accepted
+   patches. The orientation rule changes proposal search, **not** the
+   inlier threshold or final validity test.
+4. Accepts only finite connected support, double PCA refit, 2D width and
+   plane RMSE checks. Falls back to unrestricted RANSAC if no novel patches
+   are present. Does **not** invent perpendicular planes.
+
+Defaults may be tuned explicitly:
+
+```bash
+spade-calib prepare-sfm-planes ... \
+  --max-planes 16 \
+  --diverse-normal-min-angle-deg 25 \
+  --novel-normal-min-angle-deg 25
+```
+
+To reproduce the non-orientation-aware baseline, add `--no-orientation-aware`.
+
+**KITTI07 frame 105 local smoke test:** same 1,305,598-point 11-scan cloud;
+30,000 voxel-sampled points; 16 extracted patches. The updated version produced
+15 patches differing by >=25 degrees from its dominant plane (many are
+near-vertical and some oblique). The candidate matcher accepted **432** SfM
+point/plane assignments on **5** patches, with normal rank *proxy* **3**.
+The prior user result had 224 matches on 2 predominantly horizontal patches,
+normal rank proxy 1. These comparisons concern **candidate availability only**:
+no new full real 7-DoF joint result has been obtained, and some automatic
+matches are likely incorrect. The GT-based checks were performed only after
+matching as diagnostics, not to choose plane proposals or optimize extrinsics.
+The local orientation tests reject known wall-free clouds and compare a
+synthetic ground-dominated scene against the old strategy.
+
+## Full-resolution patch refit (default after orientation-aware extraction)
+
+The default `prepare-sfm-planes` pipeline now **does not randomly cap the
+voxel-representative cloud at 30,000 points**. It searches every occupied
+0.18m voxel, then recovers original accumulated LiDAR returns from the
+**finite connected support voxels of each accepted proposal**. The normal,
+offset, RMSE, scan provenance, and finite-support nearest-neighbor queries
+are computed on those original raw points after a two-pass residual trim.
+The method deliberately does *not* find all points near the infinite plane,
+as that could join unrelated, disconnected coplanar surfaces.
+
+- `--max-lidar-points 0` (default): all voxels for candidate detection.
+- `--voxel-m 0.18`: 3D voxel grid resolution for candidate detection.
+- `--voxel-only-refinement`: disable full-resolution refitting for an ablation.
+- `--max-lidar-points 30000 --voxel-only-refinement`: approximate the
+  previous 30,000-point candidate search and voxel-only fitting baseline.
+- `--no-orientation-aware`: optional separate orientation-proposal ablation.
+
+Example (run with the same original COLMAP model, Hand-Eye, and accumulated
+KITTI cloud as before):
+
+```bash
+spade-calib prepare-sfm-planes \
+  --handeye outputs/kitti07_ground/handeye.json \
+  --colmap-model /path/to/colmap/sparse/0 \
+  --image-name 000105.png --frame-index 105 \
+  --camera-json outputs/kitti07_ground/camera2_intrinsics.json \
+  --cloud outputs/kitti07_ground/accumulated_000105.npz \
+  --kitti-times /path/to/KITTI/07/times.txt \
+  --max-planes 16 \
+  --output outputs/kitti07_ground/sfm_plane_matches_105_fullres.npz
+```
+
+**Reproducibility:** `patch_settings` in the JSON report now includes
+`max_sampled_points: 0` and `refine_with_full_points: true`. The
+`patch_extraction` report exposes `voxel_points`, `sampled_points`,
+`random_sampling_applied`, `range_filtered_points`, and per-patch raw
+support counts. The per-patch `point_count` refers to the original raw
+support, not the voxel count. Patch IDs from previous results need not match
+IDs from the new extractor; rerun matching and refinement together.
+
+**Measured local KITTI07/105 diagnostic:** 1,305,598 original points,
+1,303,103 valid range points, 76,477 occupied 0.18m voxels, zero random
+sampling, 16 extracted plane patches. Ground patch 0 had 331,433 original
+support points versus 6,570 points in the old 30k-cap voxel fit. Extractor
+wall-clock times: 2.92s new vs 2.07s prior (this machine only).
+A preliminary same-anchor matching check produced 448 provisional matches
+across 4 patches vs 432 across 5 patches in the previous run. Normal rank
+proxy was 3 in both. **These numbers do not establish matching correctness
+or improved extrinsic calibration.** Full joint real-data evaluation is
+separate from extraction; dense raw points share GLIM pose/scan errors and
+are not statistically independent measurements.

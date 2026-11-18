@@ -21,7 +21,9 @@ class PatchSettings:
     voxel_size_m: float = 0.18
     min_range_m: float = 1.0
     max_range_m: float = 65.0
-    max_sampled_points: int = 30000
+    # 0 uses every voxel representative. A positive cap is an optional ablation.
+    max_sampled_points: int = 0
+    refine_with_full_points: bool = True
     max_planes: int = 8
     ransac_iterations: int = 180
     distance_threshold_m: float = 0.14
@@ -29,6 +31,15 @@ class PatchSettings:
     min_width_ratio: float = 0.08
     connectivity_radius_m: float = 1.0
     random_seed: int = 20261118
+    # Orientation-diverse candidates are sampled from locally planar 3D support.
+    # Both modes still require a connected finite patch and geometric refit.
+    orientation_aware: bool = True
+    local_normal_neighbors: int = 24
+    local_normal_max_rmse_m: float = 0.10
+    local_normal_max_eigen_ratio: float = 0.15
+    diverse_normal_min_angle_deg: float = 25.0
+    diverse_hypotheses_per_patch: int = 120
+    novel_normal_min_angle_deg: float = 25.0
 
 
 @dataclass(frozen=True)
@@ -105,20 +116,84 @@ def _largest_connected(xyz: NDArray, radius: float) -> NDArray[np.int64]:
     return np.flatnonzero(labels == np.argmax(np.bincount(labels)))
 
 
+def _local_planar_normals(points: NDArray, cfg: PatchSettings
+                          ) -> tuple[NDArray, NDArray]:
+    """Local PCA normals on voxel-sampled points; used to PROPOSE planes only.
+
+    Eigen-gating rejects locally unstructured surfaces. This does NOT use
+    geometric GT or the camera extrinsic. Return normals and a validity mask.
+    """
+    k = min(cfg.local_normal_neighbors, len(points))
+    tree = cKDTree(points)
+    _, idx = tree.query(points, k=k, workers=1)
+    neighbors = points[idx]
+    centered = neighbors - neighbors.mean(axis=1, keepdims=True)
+    cov = np.einsum('nki,nkj->nij', centered, centered) / k
+    eigen, vec = np.linalg.eigh(cov)
+    rmse = np.sqrt(np.maximum(eigen[:, 0], 0.))
+    valid = (rmse < cfg.local_normal_max_rmse_m) & (
+        eigen[:, 0] / np.maximum(eigen[:, 1], 1e-12)
+        < cfg.local_normal_max_eigen_ratio) & (
+        eigen[:, 1] / np.maximum(eigen[:, 2], 1e-12)
+        > cfg.min_width_ratio ** 2)
+    return vec[:, :, 0], valid
+
+
+def _candidate_support(xyz: NDArray, remaining: NDArray, n: NDArray, d: float,
+                       cfg: PatchSettings) -> tuple[NDArray, NDArray, float, float] | None:
+    """Refit a finite connected patch; never accept an infinite-plane fit alone."""
+    dist = np.abs(xyz[remaining] @ n + d)
+    proposed = remaining[dist <= cfg.distance_threshold_m]
+    if len(proposed) < cfg.min_inliers:
+        return None
+    connected = _largest_connected(xyz[proposed], cfg.connectivity_radius_m)
+    if len(connected) < cfg.min_inliers:
+        return None
+    chosen = proposed[connected]
+    normal, offset, _, _ = _fit_plane(xyz[chosen])
+    chosen = chosen[np.abs(xyz[chosen] @ normal + offset) <= cfg.distance_threshold_m]
+    if len(chosen) < cfg.min_inliers:
+        return None
+    # Second connection test after refitting prevents residual disconnected islands.
+    connected = _largest_connected(xyz[chosen], cfg.connectivity_radius_m)
+    chosen = chosen[connected]
+    if len(chosen) < cfg.min_inliers:
+        return None
+    normal, offset, rmse, width_ratio = _fit_plane(xyz[chosen])
+    if (width_ratio < cfg.min_width_ratio or
+            rmse > cfg.distance_threshold_m):
+        return None
+    return chosen, normal, offset, rmse
+
+
 def extract_lidar_patches(xyz_lidar: NDArray, scan_id: NDArray | None = None,
                           settings: PatchSettings = PatchSettings()
                           ) -> tuple[list[LidarPatch], dict]:
-    """Repeated RANSAC, finite connected support and refitting; no semantic labels.
+    """Extract finite patches using dominant + orientation-diverse hypotheses.
 
-    This is a baseline extractor, not a calibrated noise/visibility model.
+    Stage 1: unrestricted RANSAC obtains the dominant surface's orientation.
+    Stage 2: sample LOCAL plane-normal hypotheses that differ from dominant,
+    preventing a large ground surface from monopolizing all plane slots.
+    Stage 3: fill remaining capacity using unrestricted RANSAC on leftovers.
+
+    In every stage RANSAC only PROPOSES a plane: the accepted region must be
+    connected and PCA-refitted. This extracts geometric candidates, not verified
+    camera-LiDAR correspondences; neither GT nor calibration results enter here.
     """
     cfg = settings
     if (cfg.voxel_size_m <= 0 or cfg.distance_threshold_m <= 0 or
             cfg.connectivity_radius_m <= 0 or cfg.min_inliers < 3 or
             cfg.max_planes < 1 or cfg.ransac_iterations < 1 or
-            cfg.max_sampled_points < cfg.min_inliers or
+            cfg.max_sampled_points < 0 or
+            (0 < cfg.max_sampled_points < cfg.min_inliers) or
             not 0 < cfg.min_width_ratio < 1 or
-            cfg.max_range_m <= cfg.min_range_m or cfg.min_range_m < 0):
+            cfg.max_range_m <= cfg.min_range_m or cfg.min_range_m < 0 or
+            cfg.local_normal_neighbors < 4 or
+            cfg.local_normal_max_rmse_m <= 0 or
+            not 0 < cfg.local_normal_max_eigen_ratio < 1 or
+            not 0 < cfg.diverse_normal_min_angle_deg < 90 or
+            cfg.diverse_hypotheses_per_patch < 1 or
+            not 0 < cfg.novel_normal_min_angle_deg < 90):
         raise ValueError('Invalid patch extraction settings')
     xyz = np.asarray(xyz_lidar, dtype=np.float64)
     if xyz.ndim != 2 or xyz.shape[1] != 3 or not np.isfinite(xyz).all():
@@ -130,20 +205,97 @@ def extract_lidar_patches(xyz_lidar: NDArray, scan_id: NDArray | None = None,
     selected = np.flatnonzero((lengths >= cfg.min_range_m) & (lengths <= cfg.max_range_m))
     if len(selected) < cfg.min_inliers:
         return [], {'reason': 'too_few_points', 'sampled_points': len(selected)}
-    cells = np.floor(xyz[selected]/cfg.voxel_size_m).astype(np.int64)
-    _, unique = np.unique(cells, axis=0, return_index=True)
-    selected = selected[np.sort(unique)]
+    # Preserve a raw point -> voxel mapping for finite-patch refinement.
+    range_indices = selected
+    cells = np.floor(xyz[range_indices] / cfg.voxel_size_m).astype(np.int64)
+    _, first, inverse = np.unique(
+        cells, axis=0, return_index=True, return_inverse=True)
+    order_first = np.argsort(first)
+    reorder = np.empty(len(first), dtype=np.int64)
+    reorder[order_first] = np.arange(len(first))
+    inverse = reorder[inverse]
+    voxel_reps = range_indices[first[order_first]]
+    voxel_count = len(voxel_reps)
     rng = np.random.default_rng(cfg.random_seed)
-    if len(selected) > cfg.max_sampled_points:
-        selected = np.sort(rng.choice(selected, cfg.max_sampled_points, replace=False))
-    remaining = selected.copy()
+    sampled = np.arange(voxel_count, dtype=np.int64)
+    if cfg.max_sampled_points > 0 and voxel_count > cfg.max_sampled_points:
+        sampled = np.sort(rng.choice(
+            sampled, cfg.max_sampled_points, replace=False))
+    selected = voxel_reps[sampled]
+    points = xyz[selected]
+
+    # Build compact voxel -> original return indices only when refining on
+    # the full accumulated cloud. Sorting once avoids one global radius
+    # search for every candidate plane, and preserves finite patch support.
+    if cfg.refine_with_full_points:
+        sorted_raw = np.argsort(inverse, kind='stable')
+        counts = np.bincount(inverse, minlength=voxel_count)
+        starts = np.r_[0, np.cumsum(counts)]
+
+    def full_resolution_refit(chosen: NDArray, normal: NDArray, offset: float):
+        if not cfg.refine_with_full_points:
+            return points[chosen].copy(), normal, offset, None
+        voxel_ids = sampled[chosen]
+        parts = [sorted_raw[starts[v]:starts[v+1]] for v in voxel_ids]
+        if not parts:
+            return None
+        raw_ids = range_indices[np.concatenate(parts)]
+        raw_points = xyz[raw_ids]
+        # Mixed surface voxels are possible: trim by geometric distance
+        # before and after raw-point refitting.
+        keep = np.abs(raw_points @ normal + offset) <= cfg.distance_threshold_m
+        for _ in range(2):
+            if np.count_nonzero(keep) < cfg.min_inliers:
+                return None
+            normal, offset, _, _ = _fit_plane(raw_points[keep])
+            keep = np.abs(raw_points @ normal + offset) <= cfg.distance_threshold_m
+        support = raw_points[keep]
+        normal, offset, rmse, width = _fit_plane(support)
+        if width < cfg.min_width_ratio or rmse > cfg.distance_threshold_m:
+            return None
+        return support, normal, offset, raw_ids[keep]
+    # Local normal estimates must not be used as final plane normals.
+    local_normals, local_valid = (
+        _local_planar_normals(points, cfg) if cfg.orientation_aware
+        else (np.empty((len(points), 3)), np.zeros(len(points), dtype=bool)))
+    remaining = np.arange(len(points), dtype=np.int64)
     patches: list[LidarPatch] = []
-    for _ in range(cfg.max_planes * 5):
-        if len(patches) >= cfg.max_planes or len(remaining) < cfg.min_inliers:
-            break
-        p = xyz[remaining]
-        best = None
-        best_count = 0
+    stage_counts = {'dominant': 0, 'diverse': 0, 'fill': 0}
+    dominant_normal = None
+    cos_diverse = np.cos(np.deg2rad(cfg.diverse_normal_min_angle_deg))
+    cos_novel = np.cos(np.deg2rad(cfg.novel_normal_min_angle_deg))
+
+    def store(candidate, stage: str) -> bool:
+        nonlocal remaining, dominant_normal
+        chosen, normal, offset, rmse = candidate
+        refined = full_resolution_refit(chosen, normal, offset)
+        if refined is None:
+            # Failed raw refit: prevent repeatedly proposing the same patch.
+            remaining = remaining[~np.isin(remaining, chosen)]
+            return False
+        support, normal, offset, raw_indices = refined
+        if raw_indices is None:
+            scan_ids = np.unique(sid[selected[chosen]])
+        else:
+            scan_ids = np.unique(sid[raw_indices])
+            rmse = float(np.sqrt(np.mean((support @ normal + offset) ** 2)))
+        patches.append(LidarPatch(
+            patch_id=len(patches), normal=normal, offset_m=offset,
+            support_xyz_lidar=support, rmse_m=rmse,
+            scan_ids=scan_ids.astype(np.int64)))
+        remaining = remaining[~np.isin(remaining, chosen)]
+        stage_counts[stage] += 1
+        if dominant_normal is None:
+            dominant_normal = normal.copy()
+        return True
+
+    def unrestricted():
+        if len(remaining) < cfg.min_inliers:
+            return None
+        p = points[remaining]
+        # Choose candidate hypotheses by support; validate top candidates,
+        # because the global best infinite plane can be disconnected.
+        options = []
         for _ in range(cfg.ransac_iterations):
             triplet = p[rng.choice(len(p), 3, replace=False)]
             n = np.cross(triplet[1] - triplet[0], triplet[2] - triplet[0])
@@ -152,38 +304,88 @@ def extract_lidar_patches(xyz_lidar: NDArray, scan_id: NDArray | None = None,
                 continue
             n /= mag
             d = -float(n @ triplet[0])
-            mask = np.abs(p @ n + d) <= cfg.distance_threshold_m
-            count = int(mask.sum())
-            if count > best_count:
-                best, best_count = mask, count
-        if best is None or best_count < cfg.min_inliers:
+            count = int(np.count_nonzero(np.abs(p @ n + d) <= cfg.distance_threshold_m))
+            if count >= cfg.min_inliers:
+                options.append((count, n, d))
+        options.sort(key=lambda x: x[0], reverse=True)
+        for count, n, d in options[:12]:
+            candidate = _candidate_support(points, remaining, n, d, cfg)
+            if candidate is not None:
+                return candidate
+        return None
+
+    # Extract one dominant plane to define the reference direction.
+    first = unrestricted()
+    if first is not None:
+        store(first, 'dominant')
+
+    if cfg.orientation_aware and dominant_normal is not None:
+        # Pick only near-planar seed normals that differ from the dominant.
+        # Re-evaluate after each accepted finite patch to avoid repeatedly
+        # choosing already consumed points.
+        valid_seed = local_valid & (
+            np.abs(local_normals @ dominant_normal) <= cos_diverse)
+        failed_seed = np.zeros(len(points), dtype=bool)
+        for _ in range(cfg.max_planes * 3):
+            if len(patches) >= cfg.max_planes or len(remaining) < cfg.min_inliers:
+                break
+            seed_pool = remaining[valid_seed[remaining] & ~failed_seed[remaining]]
+            if len(seed_pool) == 0:
+                break
+            trial_seeds = rng.choice(seed_pool,
+                size=min(len(seed_pool), cfg.diverse_hypotheses_per_patch), replace=False)
+            options = []
+            p = points[remaining]
+            for seed in trial_seeds:
+                n = local_normals[seed]
+                d = -float(n @ points[seed])
+                count = int(np.count_nonzero(np.abs(p @ n + d) <= cfg.distance_threshold_m))
+                if count >= cfg.min_inliers:
+                    # Prefer new normal directions over repeated coplanar strips,
+                    # but require the SAME geometric support tests for all cases.
+                    novelty_cos = max(abs(float(n @ patch.normal)) for patch in patches)
+                    is_novel = novelty_cos <= cos_novel
+                    options.append((is_novel, count, int(seed), n, d))
+            # Novel normal directions first, then choose largest planar support.
+            options.sort(key=lambda x: (x[0], x[1]), reverse=True)
+            found = False
+            for is_novel, count, seed, n, d in options[:24]:
+                candidate = _candidate_support(points, remaining, n, d, cfg)
+                if candidate is None or abs(candidate[1] @ dominant_normal) > cos_diverse:
+                    failed_seed[seed] = True
+                    continue
+                if store(candidate, 'diverse'):
+                    found = True
+                    break
+            if not found:
+                # Tested seeds have no robust finite support; block retry.
+                failed_seed[trial_seeds] = True
+                if len(seed_pool) <= len(trial_seeds):
+                    break
+
+    # Capacity not used by reliable diverse candidates may be filled normally,
+    # preserving the original behavior in scenes containing only one direction.
+    for _ in range(cfg.max_planes * 5):
+        if len(patches) >= cfg.max_planes or len(remaining) < cfg.min_inliers:
             break
-        tentative = remaining[best]
-        normal, offset, _, _ = _fit_plane(xyz[tentative])
-        planar = remaining[np.abs(xyz[remaining] @ normal + offset) <=
-                           cfg.distance_threshold_m]
-        connected = _largest_connected(xyz[planar], cfg.connectivity_radius_m)
-        if len(connected) < cfg.min_inliers:
-            remaining = remaining[~best]
-            continue
-        chosen = planar[connected]
-        normal, offset, _, _ = _fit_plane(xyz[chosen])
-        chosen = chosen[np.abs(xyz[chosen] @ normal + offset) <=
-                        cfg.distance_threshold_m]
-        if len(chosen) < cfg.min_inliers:
-            remaining = remaining[~best]
-            continue
-        normal, offset, rmse, width_ratio = _fit_plane(xyz[chosen])
-        if width_ratio >= cfg.min_width_ratio and rmse <= cfg.distance_threshold_m:
-            patches.append(LidarPatch(
-                patch_id=len(patches), normal=normal, offset_m=offset,
-                support_xyz_lidar=xyz[chosen].copy(), rmse_m=rmse,
-                scan_ids=np.unique(sid[chosen]).astype(np.int64)))
-        # Remove ONLY the actual finite patch; disconnected coplanar surfaces remain.
-        remaining = remaining[~np.isin(remaining, chosen)]
-    return patches, {'input_points': len(xyz), 'sampled_points': len(selected),
-                     'patch_count': len(patches), 'method': 'voxel_ransac_connected_refit',
-                     'accumulation_is_not_deskew': True}
+        candidate = unrestricted()
+        if candidate is None:
+            break
+        store(candidate, 'fill')
+    return patches, {
+        'input_points': len(xyz), 'range_filtered_points': len(range_indices),
+        'voxel_points': voxel_count, 'sampled_points': len(selected),
+        'random_sampling_applied': len(selected) < voxel_count,
+        'refinement_full_resolution': cfg.refine_with_full_points,
+        'full_resolution_patch_points': [len(p.support_xyz_lidar) for p in patches],
+        'patch_count': len(patches), 'method': 'orientation_aware_voxel_ransac_connected_refit'
+        if cfg.orientation_aware else 'voxel_ransac_connected_refit',
+        'dominant_normal': dominant_normal.tolist() if dominant_normal is not None else None,
+        'diverse_min_angle_deg': cfg.diverse_normal_min_angle_deg,
+        'novel_min_angle_deg': cfg.novel_normal_min_angle_deg,
+        'local_planar_seed_count': int(local_valid.sum()),
+        'stage_counts': stage_counts, 'accumulation_is_not_deskew': True,
+    }
 
 
 def match_sfm_to_patches(camera_xyz_sfm: NDArray, feature_xy: NDArray,
