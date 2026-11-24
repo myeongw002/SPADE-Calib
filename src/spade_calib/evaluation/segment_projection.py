@@ -52,6 +52,8 @@ def render_overlay(image, uv, z, max_depth_m):
     """Fixed depth color scale across all transforms; radius 1 px."""
     out = image.copy()
     v = visible_pixels(uv,z,image.shape[1])
+    if not len(v):
+        return out, 0
     pix = np.floor(uv[v]).astype(int)
     colors = cv2.applyColorMap(np.clip((1-z[v]/max_depth_m)*255,0,255).astype(np.uint8).reshape(-1,1),
                                cv2.COLORMAP_TURBO).reshape(-1,3)
