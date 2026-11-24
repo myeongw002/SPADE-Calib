@@ -106,7 +106,7 @@ def parser():
     p.add_argument("--min-track", type=int, default=2)
     p.add_argument("--max-reprojection", type=float, default=2.)
     p.add_argument("--min-parallax", type=float, default=1.)
-    p.add_argument("--refine-extrinsic", action="store_true", help="Opt in to provisional fixed plane association solve")
+    p.add_argument("--refine-extrinsic", action="store_true", help="Legacy all-plane diagnostic only; use run_segment_ground.py for B4")
     p.add_argument("--gt-calib", type=Path, help="Optional KITTI GT, evaluation only")
     p.add_argument("--camera-index", type=int, choices=[0,1,2,3], default=2)
     return p
