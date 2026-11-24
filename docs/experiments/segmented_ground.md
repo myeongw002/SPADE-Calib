@@ -76,3 +76,46 @@ Per accepted segment: ground_camera.ply, ground_lidar.ply and
 ground_lidar_in_camera_HE.ply. Compare axis-wise errors, ground residuals
 at GT, HE-only versus joint sensitivity, scale changes, bound hits and
 HE residual changes. No claim of improvement before real-data evaluation.
+
+## B4-c and projection (follow-up)
+
+Default --ground-mode both runs B4-a (normal+offset) and B4-c (offset only)
+with the exact same frozen ground supports, scales and HE pairs. For B4-c
+only the offset component enters the ground cost; normal discrepancy is
+still reported. No rotation is fixed: the offset depends on R through
+(R n_L)^T t. --ground-mode offset-only selects only B4-c; optional
+--refit-scales adds B4-b normal+offset separately.
+
+```bash
+KITTI=/media/myungw00/256GB_SSD/kitti
+for SEQ in 07 09 10; do
+    python scripts/experiments/run_segment_ground.py \
+        --run "outputs/segment${SEQ}_trial1" \
+        --out "outputs/ground${SEQ}_B4c" \
+        --image-dir "$KITTI/data_odometry_color/sequences/${SEQ}/image_2" \
+        --gt-calib "$KITTI/data_odometry_calib/sequences/${SEQ}/calib.txt" \
+        --oracle
+done
+```
+
+Projection is optional via --image-dir (native rectified camera image,
+not resized/undistorted again). Default both raw single scans and saved
+accumulated cloud at each segment anchor. --projection-cloud single
+reduces output size. --projection-frames 105 546 adds single scans at
+specified frame IDs. Default single-scan directory from reconstruction
+config, not original 64ch. --projection-lidar-dir can point to original
+64ch /velodyne for an explicitly labeled visual diagnostic; never affects
+optimization. --intrinsics-calib overrides camera K source; default
+--gt-calib or sequence/calib.txt. Cannot change saved camera index.
+
+T_camera_lidar already includes selected rectified camera baseline,
+therefore use only K=P2[:,:3] (or saved camera index), not full P2.
+GT reference only if explicitly supplied, no oracle fits rendered.
+Depth-coded identical points and color scale, per-pixel nearest-depth
+filter, original image dimensions. All successful B4 variants + HE and
+optional GT get individual PNGs and comparison.png per frame/cloud.
+Summary contains source ID common-visible GT pixel displacement median/p90
+(diagnostic relative to reference, not actual image-feature correspondence).
+Accumulation ghosts/occlusions can remain; visual overlay is not a
+calibration accuracy guarantee. Projection failure does not discard already
+saved optimization results.

@@ -166,6 +166,7 @@ def fit_ground_handeye(pairs: MotionPairs, partition: ScalePartition, pair_mask:
                        he_settings: HandEyeSettings = HandEyeSettings(),
                        ground_weight: float = 1., sigma_normal_deg: float = 3.,
                        sigma_offset_m: float = .15, refit_scales: bool = False,
+                       normal_enabled: bool = True,
                        max_log_scale_delta: float = .15, max_rotation_deg: float = 5.,
                        max_translation_m: float = 1., initial_X: np.ndarray | None = None):
     """Fixed pairs and ground supports. B4-a fixed scales; B4-b positive scales.
@@ -219,6 +220,8 @@ def fit_ground_handeye(pairs: MotionPairs, partition: ScalePartition, pair_mask:
         return h,g
     def objective(delta,robust=True,include_ground=True):
         h,g = blocks(delta)
+        if not normal_enabled:
+            g = g[:,3:4]
         if robust:
             h = _robust(h,he_settings.robust_loss)
             g = _robust(g,"soft_l1")
@@ -235,8 +238,11 @@ def fit_ground_handeye(pairs: MotionPairs, partition: ScalePartition, pair_mask:
             angle = np.rad2deg(np.arccos(np.clip(m.camera.normal @ (X[:3,:3]@m.lidar.normal),-1,1)))
             rows.append({"segment_id":m.segment_id,"normal_angle_deg":float(angle),
                          "offset_error_m":float(r[3])})
+        gr = _robust(g,"soft_l1")
         return {"he_cost":float(.5*np.sum(_robust(h,he_settings.robust_loss)**2)/N),
-                "ground_cost":float(.5*np.sum(_robust(g,"soft_l1")**2)/len(g)) if len(g) else None,
+                "ground_normal_cost":float(.5*np.sum(gr[:,:3]**2)/len(g)) if len(g) else None,
+                "ground_offset_cost":float(.5*np.sum(gr[:,3:]**2)/len(g)) if len(g) else None,
+                "ground_cost":float(.5*np.sum((gr if normal_enabled else gr[:,3:4])**2)/len(g)) if len(g) else None,
                 "total_cost":float(.5*np.sum(objective(delta)**2)),
                 "ground":rows,"scales":s.tolist(),"T_camera_lidar":X.tolist(),
                 "motion_translation_rms_m":float(np.sqrt(np.mean(np.sum(h[:,3:]**2,axis=1)))
@@ -277,7 +283,8 @@ def fit_ground_handeye(pairs: MotionPairs, partition: ScalePartition, pair_mask:
     post = sensitivity(sol.x,True)
     return {"success":bool(sol.success and post["full_rank"]),"solver_converged":bool(sol.success),
             "message":str(sol.message),"nfev":int(sol.nfev),"ground_weight":ground_weight,
-            "refit_scales":refit_scales,"parameter_count":dim,"motion_pair_count":N,
+            "refit_scales":refit_scales,"normal_enabled":normal_enabled,
+            "parameter_count":dim,"motion_pair_count":N,
             "ground_pair_count":len(matches),"bound_hit":bool(np.any(sol.active_mask)),
             "baseline":diag(zero),"initial":diag(x0),"final":diag(sol.x),
             "initial_observability":pre,"final_observability":post,

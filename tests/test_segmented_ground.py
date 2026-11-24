@@ -69,3 +69,24 @@ def test_missing_ground_refuses_fit():
     result = fit_ground_handeye(p,ScalePartition((0,10)),np.empty(0,dtype=bool),
                                 np.eye(4),np.ones(1),[])
     assert result["reason"]=="no_ground_pairs"
+
+def test_offset_only_ignores_normal_residual_but_reports_it():
+    # Exact full 3D motion keeps all freedoms observable. Inconsistent camera
+    # normal must not change an offset-only objective.
+    rng = np.random.default_rng(12)
+    N = 48
+    Ra = Rotation.from_rotvec(rng.normal(0,.2,(N,3))).as_matrix()
+    ta = rng.normal(0,1,(N,3))
+    X = np.eye(4)
+    s = np.array([5.])
+    p = MotionPairs(Ra,ta,Ra,ta/5.,np.column_stack((np.arange(N),np.arange(N)+1)),
+                    np.arange(N,dtype=np.int64))
+    bad_normal = Rotation.from_rotvec([.1,0,0]).apply([0,0,1.])
+    matches = [SegmentGround(0,Plane([0,0,1],1.5),Plane(bad_normal,1.5))]
+    fit = fit_ground_handeye(p,ScalePartition((0,N+1)),np.ones(N,dtype=bool),
+                             X,s,matches,normal_enabled=False)
+    assert fit["success"] and not fit["normal_enabled"]
+    np.testing.assert_allclose(fit["final"]["T_camera_lidar"],X,atol=1e-8)
+    assert fit["final"]["ground_normal_cost"]>0
+    assert fit["final"]["ground_cost"]<1e-12
+    assert fit["final"]["ground_offset_cost"]<1e-12

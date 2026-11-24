@@ -69,7 +69,15 @@ def parser():
     p.add_argument("--sfm",type=Path,help="Override stored SfM path")
     p.add_argument("--arm",choices=["A0","A1"],default="A0")
     p.add_argument("--weights",type=float,nargs="+",default=[.1,1.,10.])
+    p.add_argument("--ground-mode", choices=["both","normal-offset","offset-only"], default="both",
+                   help="Compare B4-a and B4-c on the same fixed supports by default")
     p.add_argument("--refit-scales",action="store_true",help="Also run B4-b with bounded scale update")
+    p.add_argument("--image-dir",type=Path,help="Original rectified KITTI image_2 (or selected camera) directory; enables projection")
+    p.add_argument("--intrinsics-calib",type=Path,help="KITTI rectified P matrices; defaults to --gt-calib or sequence/calib.txt")
+    p.add_argument("--projection-lidar-dir",type=Path,help="Override single-scan directory saved in config; may use original 64ch for visual evaluation only")
+    p.add_argument("--projection-cloud",choices=["single","accumulated","both"],default="both")
+    p.add_argument("--projection-frames",type=int,nargs="+",help="Extra raw frame IDs for single-scan projections (all segment anchors included)")
+    p.add_argument("--projection-max-depth",type=float,default=65.)
     p.add_argument("--sigma-normal-deg",type=float,default=3.)
     p.add_argument("--sigma-offset-m",type=float,default=.15)
     p.add_argument("--max-log-scale-delta",type=float,default=.15)
@@ -89,6 +97,12 @@ def parser():
 def main(argv=None):
     args = parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO,format="%(levelname)s %(message)s")
+    if args.refit_scales and args.ground_mode=="offset-only":
+        raise ValueError("--refit-scales is a separate B4-b normal+offset comparison; use both or normal-offset")
+    if args.image_dir is None and (args.intrinsics_calib or args.projection_lidar_dir or args.projection_frames):
+        raise ValueError("Projection options require --image-dir")
+    if args.projection_frames and args.projection_cloud=="accumulated":
+        raise ValueError("Extra frame projections require single or both")
     if args.oracle and args.gt_calib is None:
         raise ValueError("--oracle requires explicit --gt-calib")
     if any(not np.isfinite(w) or w<=0 for w in args.weights) or len(set(args.weights))!=len(args.weights):
@@ -100,6 +114,9 @@ def main(argv=None):
     saved = json.loads((run/"segmented_handeye.json").read_text())["fit"]
     old_summary = json.loads((run/"summary.json").read_text())
     X = validate_extrinsic(np.array(saved["T_camera_lidar"]))
+    camera_index = int(config["camera_index"])
+    if args.camera_index is not None and args.camera_index != camera_index:
+        raise ValueError("Cannot change camera index of saved HE / reconstruction")
     rows = saved["segments"]
     partition = ScalePartition(tuple([0]+[int(r["stop_index_exclusive"]) for r in rows]))
     s = np.array([r["sfm_scale_to_metric"] for r in rows])
@@ -185,11 +202,19 @@ def main(argv=None):
              "normal_angle_deg":float(np.rad2deg(np.arccos(np.clip(
                  m.camera.normal@(gt[:3,:3]@m.lidar.normal),-1,1))))}
             for m,r in zip(matches,raw)]
-    for refit in ([False,True] if args.refit_scales else [False]):
+    variants = []
+    if args.ground_mode in ("both","normal-offset"):
+        variants.append(("a",False,True))
+    if args.ground_mode in ("both","offset-only"):
+        variants.append(("c",False,False))
+    if args.refit_scales:
+        variants.append(("b",True,True))
+    for variant,refit,normal_enabled in variants:
         for weight in args.weights:
-            name = f"B4{'b' if refit else 'a'}_w{weight:g}"
+            name = f"B4{variant}_w{weight:g}"
             opts = dict(he_settings=he,ground_weight=weight,sigma_normal_deg=args.sigma_normal_deg,
                         sigma_offset_m=args.sigma_offset_m,refit_scales=refit,
+                        normal_enabled=normal_enabled,
                         max_log_scale_delta=args.max_log_scale_delta,max_rotation_deg=args.max_rotation_deg,
                         max_translation_m=args.max_translation_m)
             LOG.info("Optimizing %s",name)
@@ -203,6 +228,32 @@ def main(argv=None):
                     oracle["gt_evaluation"]=evaluate_camera_lidar(np.array(oracle["final"]["T_camera_lidar"]),gt)
                 summary["oracle_experiments"][name]=oracle
             write_json(args.out/"summary.json",summary)
+    if args.image_dir is not None:
+        from spade_calib.evaluation.segment_projection import export_projections
+        from spade_calib.evaluation.kitti import parse_kitti_odom_calib
+        calib = args.intrinsics_calib or args.gt_calib or Path(args.sequence or config["sequence"])/"calib.txt"
+        K = parse_kitti_odom_calib(calib,require_tr=False)[f"P{camera_index}"][:,:3]
+        transforms = {"HE":X}
+        for name,result in summary["experiments"].items():
+            if result.get("success") and "final" in result:
+                transforms[name] = np.asarray(result["final"]["T_camera_lidar"])
+        # Only the explicit evaluation GT is shown; never visualize oracle fits as deployable.
+        if args.gt_calib:
+            transforms["GT_reference"] = gt
+        scans = args.projection_lidar_dir or Path(config["lidar_dir"])
+        anchors = {int(e["anchor_frame"]):int(e["segment_id"])
+                   for e in old_summary["segments"] if e["arms"].get(args.arm,{}).get("status")=="ok"}
+        extra = set(args.projection_frames or [])
+        if any(f<0 for f in extra):
+            raise ValueError("Negative extra frame ID")
+        summary["projection"] = export_projections(
+            image_dir=args.image_dir, scan_dir=scans, run_dir=run, out_dir=args.out/"projection",
+            anchors=anchors, extra_frames=extra, arm=args.arm, cloud_mode=args.projection_cloud,
+            K=K, transforms=transforms, read_xyz_ply=read_xyz_ply,
+            max_depth_m=args.projection_max_depth)
+        summary["projection"]["camera_index"] = camera_index
+        summary["projection"]["intrinsics_source"] = str(calib)
+        write_json(args.out/"summary.json",summary)
     LOG.info("Completed B4: %s",args.out)
     return 0
 
