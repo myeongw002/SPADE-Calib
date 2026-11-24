@@ -17,7 +17,7 @@ from scipy.spatial.transform import Rotation
 from run_segment_ground import read_xyz_ply,write_ply,write_json
 from spade_calib.calibration.ground import Plane
 from spade_calib.calibration.segmented_ground import SegmentGround,_robust
-from spade_calib.calibration.scene_consistency import SceneSegment,fit_scene
+from spade_calib.calibration.scene_consistency import SceneSegment,fit_scene,scene_factors,voxel_return_indices
 from spade_calib.handeye.residuals import residuals
 from spade_calib.handeye.solver import HandEyeSettings
 from spade_calib.io.kitti import load_kitti_trajectory_data,frame_id_from_name,read_kitti_times_ns
@@ -39,6 +39,35 @@ def normal_support(tree,p,neighbors=16):
     valid=((dist[:,0]<=.35)&(dist[:,-1]<=1.5)&(e[:,1]>=.0025)
            &(e[:,0]<=.2*e[:,1])&(e[:,1]>=.05*e[:,2]))
     return valid,V[:,:,0]
+
+
+def full_normal_support(tree,p,chunk=4096):
+    """Bound temporary PCA allocations; no filtering or sampling here."""
+    valid=np.empty(len(p),dtype=bool)
+    normals=np.empty((len(p),3),dtype=np.float32)
+    for start in range(0,len(p),chunk):
+        end=min(start+chunk,len(p))
+        m,n=normal_support(tree,p[start:end])
+        valid[start:end]=m
+        normals[start:end]=n
+    return valid,normals
+
+
+def voxel_support(cache,window,Ra,ta,voxel):
+    """Accumulate ALL range-valid returns, voxelize once, then normal gate.
+
+    Cached XYZ are in anchor LiDAR axes. Normal validity is computed once
+    per original return but is NOT applied before voxel selection.
+    """
+    xyz=np.concatenate([cache[f][0] for f in window])
+    q=(xyz-ta)@Ra
+    ids=voxel_return_indices(q,voxel)
+    v=np.concatenate([cache[f][3] for f in window])
+    keep=ids[v[ids]]
+    n=np.concatenate([cache[f][1] for f in window])
+    src=np.concatenate([np.column_stack((np.full(len(cache[f][2]),f,dtype=np.int64),cache[f][2]))
+                        for f in window])
+    return q[keep],n[keep].astype(float),src[keep],len(q),len(ids)
 
 
 def choose_support(cache,window,cap,seed):
@@ -95,7 +124,10 @@ def main(argv=None):
         p.add_argument("--"+name,type=Path)
     p.add_argument("--windows",type=int,nargs="+",default=[1,3,5,11])
     p.add_argument("--center-stride",type=int,default=1,help="Stride in matched camera frames")
-    p.add_argument("--source-cap",type=int,default=512,help="Raw returns sampled per scan before normal gate")
+    p.add_argument("--support-mode",choices=["voxel","sampled"],default="voxel",
+                   help="voxel: all raw scans then one local voxel grid; sampled: legacy G")
+    p.add_argument("--local-voxel",type=float,default=None,help="Local LiDAR voxel side in m; default archived A0 voxel")
+    p.add_argument("--source-cap",type=int,default=512,help="Legacy sampled mode only")
     p.add_argument("--points-per-center",type=int,default=128)
     p.add_argument("--min-points",type=int,default=32)
     p.add_argument("--sigma-scene",type=float,default=.15)
@@ -111,13 +143,20 @@ def main(argv=None):
     args=p.parse_args(argv)
     logging.basicConfig(level=logging.INFO,format="%(levelname)s %(message)s")
     if (not args.windows or len(set(args.windows))!=len(args.windows) or any(w<1 or w%2==0 for w in args.windows)
-            or args.center_stride<1 or not 3<=args.min_points<=args.points_per_center<=args.source_cap
+            or args.center_stride<1 or args.min_points<3
+            or (args.support_mode=="sampled" and not args.min_points<=args.points_per_center<=args.source_cap)
+            or (args.local_voxel is not None and (not np.isfinite(args.local_voxel) or args.local_voxel<=0))
             or args.seed<0 or (args.oracle and args.gt_calib is None)):
         raise ValueError("Invalid window/sample settings")
     if args.out.exists() and any(args.out.iterdir()):
         raise FileExistsError("Use a fresh output directory")
     run=args.run
     cfg=json.loads((run/"config.json").read_text())
+    voxel=float(cfg["voxel"]) if args.local_voxel is None else args.local_voxel
+    if not np.isfinite(voxel) or voxel<=0:
+        raise ValueError("Invalid local voxel")
+    if args.support_mode=="voxel" and args.export_maps:
+        LOG.warning("Voxel mode exports all retained returns for all arms; memory and disk usage may be large")
     saved=json.loads((run/"segmented_handeye.json").read_text())["fit"]
     archived=json.loads((run/"summary.json").read_text())
     rows=saved["segments"]; K=len(rows)
@@ -170,6 +209,9 @@ def main(argv=None):
     windows=sorted(set(args.windows)|{1})
     support={w:[] for w in windows}
     report={"run":str(run),"settings":{k:str(v) if isinstance(v,Path) else v for k,v in vars(args).items()},
+            "local_voxel_m":voxel if args.support_mode=="voxel" else None,
+            "support_mode":args.support_mode,
+            "voxel_rule":"nearest actual return to local voxel centroid, then fixed A0 normal gate" if args.support_mode=="voxel" else None,
             "archived_cost":expected,"recomputed_cost":float(cost),"archived_pair_count":int(mask.sum()),
             "baseline":{"T_camera_lidar":X.tolist(),"scales":s.tolist()},
             "segments":[],"experiments":{},"oracle_experiments":{},
@@ -202,32 +244,59 @@ def main(argv=None):
         for f in source:
             scan=load_kitti_bin_scan(scans[f],scan_id=0,timestamp_ns=int(times[f]),
                                     max_range_m=float(cfg["max_range"]))
-            rng=np.random.default_rng([args.seed,f])
-            ids=rng.choice(len(scan.xyz),min(len(scan.xyz),args.source_cap),replace=False)
-            p=(scan.xyz[ids]@LR[f-first].T+LT[f-first]-t0)@R0
-            valid,n=normal_support(tree,p)
-            cache[f]=(p[valid],n[valid],scan.source_return_index[ids][valid])
-        centers=[]; per={w:{"q":[],"n":[],"src":[]} for w in windows}
+            if args.support_mode=="voxel":
+                p=(scan.xyz@LR[f-first].T+LT[f-first]-t0)@R0
+                valid,n=full_normal_support(tree,p)
+                cache[f]=(p,n,scan.source_return_index,valid)
+            else:
+                rng=np.random.default_rng([args.seed,f])
+                ids=rng.choice(len(scan.xyz),min(len(scan.xyz),args.source_cap),replace=False)
+                p=(scan.xyz[ids]@LR[f-first].T+LT[f-first]-t0)@R0
+                valid,n=normal_support(tree,p)
+                cache[f]=(p[valid],n[valid],scan.source_return_index[ids][valid])
+        centers=[]
+        per={w:{"q":[],"src":[],"factors":[],"counts":[],"raw":[],"voxel":[],"scan_counts":[],"used":{}} for w in windows}
         for i in range(a,b,args.center_stride):
             f=int(frames[i])
             if f==anchor or f not in cache: continue
-            # Same centers and exact point budget across every window.
+            # Same camera centers; voxel mode intentionally does NOT match point counts.
             # Clip raw-frame windows at segment boundary; no cross-segment scan.
+            Ra=R0.T@LR[f-first];ta=R0.T@(LT[f-first]-t0)
             cand={}
             for w in windows:
                 use=[j for j in range(f-w//2,f+w//2+1) if j in cache]
                 if sum(len(cache[j][0]) for j in use)<args.min_points: break
-                cand[w]=choose_support(cache,use,args.points_per_center,[args.seed,f,w])
+                if args.support_mode=="voxel":
+                    q,n,src,raw_count,voxel_count=voxel_support(cache,use,Ra,ta,voxel)
+                    if len(q)<args.min_points: break
+                    cand[w]=(q,n,src,raw_count,voxel_count)
+                else:
+                    xyz,n,src=choose_support(cache,use,args.points_per_center,[args.seed,f,w])
+                    cand[w]=((xyz-ta)@Ra,n,src,None,None)
             if len(cand)!=len(windows): continue
             common=min(len(v[0]) for v in cand.values())
-            Ra=R0.T@LR[f-first];ta=R0.T@(LT[f-first]-t0)
             centers.append(i)
-            for w,(xyz,n,src) in cand.items():
-                # If a sparse center has fewer points, match the budget across widths.
-                keep=np.random.default_rng([args.seed,f,w,1]).choice(len(xyz),common,replace=False)
-                per[w]["q"].append((xyz[keep]-ta)@Ra)
-                per[w]["n"].append(n[keep])
-                per[w]["src"].append(src[keep])
+            for w,(q,n,src,raw_count,voxel_count) in cand.items():
+                if args.support_mode=="sampled":
+                    keep=np.random.default_rng([args.seed,f,w,1]).choice(len(q),common,replace=False)
+                    q,n,src=q[keep],n[keep],src[keep]
+                d=per[w]
+                d["factors"].append(scene_factors(q,n))
+                d["counts"].append(len(q))
+                if raw_count is not None:
+                    d["raw"].append(raw_count);d["voxel"].append(voxel_count)
+                scan_ids=np.unique(src[:,0])
+                d["scan_counts"].append(len(scan_ids))
+                for j in scan_ids:
+                    j=int(j)
+                    if j not in d["used"]:
+                        d["used"][j]=np.zeros(int(cache[j][2].max())+1,dtype=bool)
+                    d["used"][j][src[src[:,0]==j,1]]=True
+                if args.export_maps:
+                    d["q"].append(q.astype(np.float32))
+                    d["src"].append(src.astype(np.int32))
+            if len(centers)%25==0:
+                LOG.info("Segment %d: prepared %d centers",k,len(centers))
         if len(centers)<3: raise ValueError(f"Segment {k}: too few common centers")
         ci=np.asarray(centers,dtype=int)
         Ra=R0.T@samples.lidar_R_world[ci]
@@ -242,14 +311,23 @@ def main(argv=None):
         coverage={}
         for w in windows:
             d=per[w]
-            seg=SceneSegment(k,frames[ci],Ra,ta,Rb,tb,d["q"],d["n"],d["src"])
+            seg=SceneSegment(k,frames[ci],Ra,ta,Rb,tb,d["q"],[],d["src"],
+                             compact_factors=d["factors"],point_counts=np.array(d["counts"]))
             support[w].append(seg)
-            src=np.concatenate(d["src"])
-            coverage[str(w)]={"sampled_returns":len(src),"unique_raw_returns":len(np.unique(src,axis=0)),
-                              "mean_source_scans_per_center":float(np.mean([len(np.unique(x[:,0])) for x in d["src"]]))}
+            coverage[str(w)]={"sampled_returns":int(sum(d["counts"])),
+                              "unique_raw_returns":int(sum(np.count_nonzero(v) for v in d["used"].values())),
+                              "mean_source_scans_per_center":float(np.mean(d["scan_counts"])),
+                              "mean_retained_points_per_center":float(np.mean(d["counts"])),
+                              "min_retained_points_per_center":int(min(d["counts"])),
+                              "max_retained_points_per_center":int(max(d["counts"]))}
+            if d["raw"]:
+                coverage[str(w)].update(raw_accumulated_returns=int(sum(d["raw"])),
+                                        occupied_voxels_before_normal_gate=int(sum(d["voxel"])),
+                                        mean_raw_points_per_center=float(np.mean(d["raw"])),
+                                        mean_voxels_before_normal_gate=float(np.mean(d["voxel"])))
         report["segments"].append(dict(segment_id=k,anchor_frame=anchor,
               selected_centers=frames[ci].tolist(),possible_centers=len(range(a,b,args.center_stride))-int(anchor_idx in range(a,b,args.center_stride)),
-              raw_scans=len(source),normal_valid_returns=int(sum(len(x[0]) for x in cache.values())),
+              raw_scans=len(source),normal_valid_returns=int(sum(np.count_nonzero(x[3]) if args.support_mode=="voxel" else len(x[0]) for x in cache.values())),
               windows=coverage))
         LOG.info("Segment %d: %d common centers",k,len(ci))
     write_json(args.out/"summary.json",report)
@@ -274,6 +352,8 @@ def main(argv=None):
     # weighting and bounds. Archived lag-10 HE uses a different motion set.
     run_fit("G0_anchor_fixed",support[1],"motion",False,0.)
     run_fit("G0_anchor_scale",support[1],"motion",True,0.)
+    if ground:
+        run_fit("G0_anchor_scale_ground",support[1],"motion",True,args.ground_weight)
     for w in args.windows:
         segments=support[w]
         if args.export_maps:

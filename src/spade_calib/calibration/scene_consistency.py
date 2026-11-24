@@ -47,6 +47,31 @@ def scene_factors(q,n):
     return sqrt_factor(np.kron(np.eye(3),h.T@h/len(h))),sqrt_factor(D.T@D/len(D))
 
 
+def voxel_return_indices(q, voxel):
+    """One actual return nearest each occupied voxel's centroid.
+
+    Grid is in the fixed center LiDAR frame. No pre-sampling, no point cap.
+    Choosing a measured return rather than a synthetic centroid preserves
+    exact (scan frame, return index) identity for both reconstructed maps.
+    """
+    q=np.asarray(q,dtype=float)
+    if q.ndim!=2 or q.shape[1]!=3 or not np.isfinite(q).all() or not np.isfinite(voxel) or voxel<=0:
+        raise ValueError("Invalid voxel support")
+    if not len(q):
+        return np.empty(0,dtype=np.int64)
+    _,inv=np.unique(np.floor(q/voxel).astype(np.int64),axis=0,return_inverse=True)
+    inv=inv.reshape(-1)
+    count=np.bincount(inv)
+    means=np.column_stack([np.bincount(inv,weights=q[:,d])/count for d in range(3)])
+    dist=np.sum((q-means[inv])**2,axis=1)
+    best=np.full(len(count),np.inf)
+    np.minimum.at(best,inv,dist)
+    ids=np.arange(len(q),dtype=np.int64)
+    winners=np.full(len(count),len(q),dtype=np.int64)
+    np.minimum.at(winners,inv,np.where(dist==best[inv],ids,len(q)))
+    return winners
+
+
 @dataclass
 class SceneSegment:
     segment_id: int
@@ -58,16 +83,32 @@ class SceneSegment:
     q: list
     normals: list
     source_frames: list
+    compact_factors: list | None = None
+    point_counts: np.ndarray | None = None
 
     def __post_init__(self):
         n=len(self.frames)
-        if n<3 or any(len(a)!=n for a in (self.Ra,self.ta,self.Rb,self.tb,self.q,self.normals,self.source_frames)):
+        if n<3 or any(len(a)!=n for a in (self.Ra,self.ta,self.Rb,self.tb)):
             raise ValueError("Insufficient or inconsistent center support")
-        if any(len(q)!=len(f) for q,f in zip(self.q,self.source_frames)):
-            raise ValueError("Source scan identity mismatch")
-        factors=[scene_factors(q,v) for q,v in zip(self.q,self.normals)]
+        if self.compact_factors is None:
+            if any(len(a)!=n for a in (self.q,self.normals,self.source_frames)):
+                raise ValueError("Insufficient or inconsistent point support")
+            factors=[scene_factors(q,v) for q,v in zip(self.q,self.normals)]
+            self.point_counts=np.array([len(q) for q in self.q])
+        else:
+            factors=self.compact_factors
+            self.point_counts=np.asarray(self.point_counts)
+            if len(factors)!=n or self.point_counts.shape!=(n,) or np.any(self.point_counts<3):
+                raise ValueError("Invalid compact support")
+        if self.q or self.source_frames:
+            if len(self.q)!=n or len(self.source_frames)!=n or any(
+                len(q)!=len(f) or len(q)!=c for q,f,c in zip(self.q,self.source_frames,self.point_counts)):
+                raise ValueError("Source scan identity mismatch")
         self.point_factors=np.stack([f[0] for f in factors])
         self.plane_factors=np.stack([f[1] for f in factors])
+        if any(a.shape!=(n,12,12) or not np.isfinite(a).all() for a in (self.point_factors,self.plane_factors)):
+            raise ValueError("Invalid scene factors")
+        self.compact_factors=None
         self.pairs=MotionPairs(self.Ra,self.ta,self.Rb,self.tb,
                               np.column_stack((np.arange(n),np.arange(n)+1)),
                               np.arange(n,dtype=np.int64))
@@ -85,6 +126,8 @@ class SceneSegment:
         return np.einsum("nij,nj->ni",F,self.difference(X,s))
 
     def maps(self,X,s):
+        if not self.q:
+            raise ValueError("Point support not retained; enable map export")
         R,t=predicted_relative(self.Rb,self.tb,X,s)
         reference=np.concatenate([q@a.T+b for q,a,b in zip(self.q,self.Ra,self.ta)])
         estimate=np.concatenate([q@a.T+b for q,a,b in zip(self.q,R,t)])
@@ -149,7 +192,7 @@ def fit_scene(segments,X_he,scales,he,*,kind="point",refit_scales=False,
             p=seg.raw_blocks(X,s[k],"point");n=seg.raw_blocks(X,s[k],"plane")
             m=seg.raw_blocks(X,s[k],"motion")
             rows.append(dict(segment_id=k,centers=len(seg.frames),
-                             sampled_returns=sum(map(len,seg.q)),
+                             sampled_returns=int(np.sum(seg.point_counts)),
                              point_rms_m=float(np.sqrt(np.mean(np.sum(p*p,axis=1)))),
                              plane_rms_m=float(np.sqrt(np.mean(np.sum(n*n,axis=1)))),
                              motion_translation_rms_m=float(np.sqrt(np.mean(np.sum(m[:,3:]**2,axis=1)))),

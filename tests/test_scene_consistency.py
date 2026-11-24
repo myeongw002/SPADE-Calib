@@ -48,3 +48,27 @@ def test_planar_motion_does_not_gain_vertical_observability_from_scene():
     seg=SceneSegment(0,np.arange(len(R)),R,t,R,t,q,n,[np.zeros((30,2),int) for _ in R])
     f=fit_scene([seg],np.eye(4),np.ones(1),HandEyeSettings(),kind="point")
     assert not f["success"] and f["reason"]=="rank_deficient"
+
+
+def test_voxel_retains_nearest_actual_return_and_no_cap():
+    from spade_calib.calibration.scene_consistency import voxel_return_indices
+    p=np.array([[.01,0,0],[.09,0,0],[.12,0,0],[.8,0,0],[-.1,0,0]])
+    ids=voxel_return_indices(p,.5)
+    assert set(ids)=={1,3,4}
+    many=np.column_stack((np.arange(500)*.2,np.zeros(500),np.zeros(500)))
+    assert len(voxel_return_indices(many,.1))==500
+
+
+def test_compact_support_equivalent_without_retained_points():
+    rng=np.random.default_rng(17)
+    q=[rng.normal(size=(40,3)) for _ in range(4)]
+    n=[v/np.linalg.norm(v,axis=1,keepdims=True) for v in q]
+    R=Rotation.from_rotvec(rng.normal(0,.1,(4,3))).as_matrix()
+    t=rng.normal(size=(4,3))
+    a=SceneSegment(0,np.arange(4),R,t,R,t,q,n,[np.zeros((40,2),int) for _ in q])
+    b=SceneSegment(0,np.arange(4),R,t,R,t,[],[],[],
+                   compact_factors=[scene_factors(x,y) for x,y in zip(q,n)],
+                   point_counts=np.full(4,40))
+    X=np.eye(4);X[:3,3]=[.2,-.3,.4]
+    for kind in ("point","plane","motion"):
+        np.testing.assert_allclose(a.raw_blocks(X,1.,kind),b.raw_blocks(X,1.,kind))
