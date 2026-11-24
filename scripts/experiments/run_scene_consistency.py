@@ -140,6 +140,7 @@ def main(argv=None):
     p.add_argument("--linear",action="store_true",help="Unrobustified control")
     p.add_argument("--oracle",action="store_true",help="GT X start diagnostic; fixed supports")
     p.add_argument("--export-maps",action="store_true",help="Sampled reference and camera-driven map PLYs")
+    p.add_argument("--prepare-only",action="store_true",help="Save compact scene factors and skip fits/projections")
     args=p.parse_args(argv)
     logging.basicConfig(level=logging.INFO,format="%(levelname)s %(message)s")
     if (not args.windows or len(set(args.windows))!=len(args.windows) or any(w<1 or w%2==0 for w in args.windows)
@@ -331,6 +332,17 @@ def main(argv=None):
               windows=coverage))
         LOG.info("Segment %d: %d common centers",k,len(ci))
     write_json(args.out/"summary.json",report)
+    if args.prepare_only:
+        for w,segments in support.items():
+            folder=args.out/f"factors_w{w}"
+            folder.mkdir()
+            for seg in segments:
+                np.savez_compressed(folder/f"segment_{seg.segment_id:02d}.npz",
+                    frames=seg.frames,Ra=seg.Ra,ta=seg.ta,Rb=seg.Rb,tb=seg.tb,
+                    point_factors=seg.point_factors,plane_factors=seg.plane_factors,
+                    point_counts=seg.point_counts)
+        LOG.info("Prepared compact factors: %s",args.out)
+        return 0
     opts=dict(sigma_scene=args.sigma_scene,sigma_ground=args.sigma_ground,
               max_rotation_deg=args.max_rotation_deg,max_translation_m=args.max_translation_m,
               max_log_scale=args.max_log_scale,linear=args.linear)
