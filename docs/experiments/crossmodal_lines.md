@@ -56,3 +56,23 @@ depth, image selection only). The raw image endpoints are annotated
 separately, never snapped to projected points. Prepared data and old
 annotations remain compatible; new annotations record both ROI polygons.
 No need to run prepare again.
+
+
+## Optional existing target free-space filter
+
+Add `--ghost-filter` to prepare and use a NEW output directory. It
+reuses lidar/ghost_filter.py unchanged, after rigid accumulation in
+the target LiDAR frame and BEFORE voxel sampling. Defaults: azimuth
+0.2 deg, elevation 2 deg, range margin 0.5 m. The local target scan
+ID is found from the actual frame list (not the KITTI frame number).
+Historical and future non-target points in the centered window
+are tested against target range bins. Target returns, unobserved
+bins and points behind target returns are kept by this filter;
+voxel sampling may subsequently reduce them. This is not full
+dynamic-object removal or temporal consistency. Angular binning
+and GLIM pose error can remove valid static points. No change to
+annotation/fit. The manifest records filter configuration, pre/post
+filter counts, removal fraction, target counts, per-scan counts
+and post-voxel count. Compare to an unfiltered run with identical
+frames/window/range/voxel/initialization; don't reuse annotations
+across changed cloud manifests.

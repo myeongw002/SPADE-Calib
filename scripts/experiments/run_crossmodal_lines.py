@@ -11,6 +11,7 @@ from scipy.spatial.transform import Rotation
 
 from run_segment_ground import write_json
 from spade_calib.io.kitti import accumulate_kitti_rigid_window
+from spade_calib.lidar.ghost_filter import FreeSpaceSettings,target_free_space_mask,filter_cloud
 from spade_calib.evaluation.kitti import parse_kitti_odom_calib,kitti_gt_camera_lidar,evaluate_camera_lidar
 from spade_calib.evaluation.segment_projection import project_xyz,render_overlay,_numbered_file
 from spade_calib.selection.scale_segmentation import validate_extrinsic
@@ -33,6 +34,33 @@ def save_image(path,image):
     if not cv2.imwrite(str(path),image): raise OSError(f"Cannot save {path}")
 
 
+def prepare_cloud(cloud,frames,target_frame,voxel,ghost_settings=None):
+    """Filter before voxel selection; scan_id is LOCAL to the accumulation window."""
+    if target_frame not in frames:
+        raise ValueError("Target frame missing from accumulation window")
+    target_id=frames.index(target_frame)
+    n_before=len(cloud.xyz)
+    target_before=int(np.count_nonzero(cloud.scan_id==target_id))
+    before=np.bincount(cloud.scan_id.astype(int),minlength=len(frames))
+    if ghost_settings is not None:
+        keep=target_free_space_mask(cloud,target_scan_id=target_id,settings=ghost_settings)
+        cloud=filter_cloud(cloud,keep)
+    n_after=len(cloud.xyz)
+    after=np.bincount(cloud.scan_id.astype(int),minlength=len(frames))
+    target_after=int(after[target_id])
+    if target_after!=target_before:
+        raise RuntimeError("Free-space filter removed target returns")
+    idx=voxel_return_indices(cloud.xyz,voxel)
+    stats=dict(points_before_filter=n_before,points_after_filter=n_after,
+               removed_points=n_before-n_after,
+               removed_fraction=float((n_before-n_after)/max(n_before,1)),
+               target_scan_id=target_id,target_points_before=target_before,
+               target_points_after=target_after,points_after_voxel=len(idx),
+               per_scan=[dict(frame=int(f),before=int(b),after=int(c),removed=int(b-c))
+                         for f,b,c in zip(frames,before,after)])
+    return cloud.xyz[idx],np.asarray(frames)[cloud.scan_id[idx]],stats
+
+
 def prepare(a):
     cfg=json.loads((a.run/"config.json").read_text())
     archive=json.loads((a.run/"summary.json").read_text())
@@ -51,19 +79,23 @@ def prepare(a):
     times=Path(cfg["sequence"])/"times.txt"
     first=int(cfg["glim_first_frame"]);last=first+len(np.loadtxt(cfg["glim"],ndmin=2))-1
     frames=sorted(set(a.frames or [int(r["anchor_frame"]) for r in archive["segments"]]))
+    ghost_settings=(FreeSpaceSettings(azimuth_resolution_deg=a.ghost_azimuth_deg,
+                                      elevation_resolution_deg=a.ghost_elevation_deg,
+                                      margin_m=a.ghost_margin_m) if a.ghost_filter else None)
     fresh(a.out)
     manifest=dict(run=str(a.run),camera_index=camera,K=K.tolist(),T_camera_lidar=X.tolist(),
                   initial_summary=str(a.initial_summary) if a.initial_summary else None,
                   initial_arm=a.initial_arm if a.initial_summary else "HE",
-                  window=a.window,voxel_m=a.voxel,frames=[],
+                  window=a.window,voxel_m=a.voxel,max_range_m=a.max_range,frames=[],
+                  ghost_filter=dict(enabled=bool(ghost_settings),method="target_free_space" if ghost_settings else "none",
+                                    settings=vars(ghost_settings) if ghost_settings else None),
                   warning="GLIM rigid local accumulation, no deskew; initial overlay not a label, GT not loaded.")
     for f in frames:
         if not first<=f<=last: raise ValueError(f"Frame outside GLIM range: {f}")
         ids=list(range(max(first,f-a.window//2),min(last,f+a.window//2)+1))
         c=accumulate_kitti_rigid_window(cfg["lidar_dir"],cfg["glim"],times,ids,
             target_frame_id=f,glim_first_frame=first,max_range_m=a.max_range)
-        idx=voxel_return_indices(c.xyz,a.voxel)
-        xyz=c.xyz[idx];scans=np.asarray(ids)[c.scan_id[idx]]
+        xyz,scans,filter_stats=prepare_cloud(c,ids,f,a.voxel,ghost_settings)
         folder=a.out/f"frame_{f:06d}";folder.mkdir()
         np.savez_compressed(folder/"cloud.npz",xyz=xyz,scan_frames=scans)
         path=_numbered_file(a.image_dir,f,(".png",".jpg",".jpeg"))
@@ -73,10 +105,12 @@ def prepare(a):
         _,uv,z=project_xyz(xyz,X,K,img.shape[1],img.shape[0],max_depth_m=a.max_range)
         overlay,_=render_overlay(img,uv,z,a.max_range)
         save_image(folder/"initial_overlay.png",overlay)
-        manifest["frames"].append(dict(frame=f,source_frames=ids,points=len(xyz),
+        manifest["frames"].append(dict(frame=f,source_frames=ids,points=len(xyz),ghost_filter=filter_stats,
             image_shape=list(img.shape[:2]),cloud_sha256=sha(folder/"cloud.npz"),
             image_sha256=sha(folder/"image.png")))
-        print(f"Frame {f:06d}: {len(xyz)} points from {len(ids)} scans",flush=True)
+        print(f"Frame {f:06d}: {filter_stats['points_before_filter']} -> "
+              f"{filter_stats['points_after_filter']} (ghost removed {filter_stats['removed_fraction']:.2%})"
+              f" -> {len(xyz)} after voxel, {len(ids)} scans",flush=True)
     write_json(a.out/"manifest.json",manifest)
 
 
@@ -368,6 +402,10 @@ def main():
     q.add_argument("--initial-summary",type=Path);q.add_argument("--initial-arm",default="H2_joint_scene")
     q.add_argument("--frames",nargs="+",type=int);q.add_argument("--window",type=int,default=21)
     q.add_argument("--voxel",type=float,default=.05);q.add_argument("--max-range",type=float,default=40.)
+    q.add_argument("--ghost-filter",action="store_true",help="Apply existing target-scan free-space filter BEFORE voxel sampling")
+    q.add_argument("--ghost-azimuth-deg",type=float,default=.2)
+    q.add_argument("--ghost-elevation-deg",type=float,default=2.)
+    q.add_argument("--ghost-margin-m",type=float,default=.5)
     q.set_defaults(func=prepare)
     q=sp.add_parser("annotate");q.add_argument("--data",type=Path,required=True)
     q.add_argument("--frame",type=int,required=True);q.add_argument("--feature",required=True)

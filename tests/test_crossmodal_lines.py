@@ -49,3 +49,26 @@ def test_linked_roi_orientation_and_original_point_identity():
                                   [False,False,False,True,False])
     np.testing.assert_array_equal(polygon_roi_mask(xyz,ids,uv,{"image":poly_img,"bev":poly_bev}),
                                   [False,False,False,True,False])
+
+
+def test_prepare_cloud_free_space_before_voxel(monkeypatch):
+    import sys
+    from pathlib import Path
+    from spade_calib.lidar.deskew import AccumulatedCloud
+    from spade_calib.lidar.ghost_filter import FreeSpaceSettings
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1]/"scripts"/"experiments"))
+    from run_crossmodal_lines import prepare_cloud
+    # Local ID 1 is the actual target frame 105. Earlier and later
+    # returns in front of its observed surface contradict free space.
+    p=np.array([[5.,0,0],[10.,0,0],[6.,0,0],[12.,0,0],[0.,5.,0]],np.float32)
+    ids=np.array([0,1,2,0,2],np.uint16)
+    c=AccumulatedCloud(p,ids,None,None,np.arange(5),0,motion_model="rigid")
+    xyz,frames,stats=prepare_cloud(c,[104,105,106],105,.05,FreeSpaceSettings())
+    assert stats["removed_points"]==2
+    assert stats["target_scan_id"]==1
+    assert stats["target_points_before"]==stats["target_points_after"]==1
+    assert [r["removed"] for r in stats["per_scan"]]==[1,0,1]
+    assert len(xyz)==3
+    assert set(zip(map(tuple,xyz),frames))=={((10.,0.,0.),105),((12.,0.,0.),104),((0.,5.,0.),106)}
+    xyz0,_,stats0=prepare_cloud(c,[104,105,106],105,.05)
+    assert len(xyz0)==5 and stats0["removed_points"]==0
