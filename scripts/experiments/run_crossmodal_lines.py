@@ -15,7 +15,8 @@ from spade_calib.evaluation.kitti import parse_kitti_odom_calib,kitti_gt_camera_
 from spade_calib.evaluation.segment_projection import project_xyz,render_overlay,_numbered_file
 from spade_calib.selection.scale_segmentation import validate_extrinsic
 from spade_calib.calibration.crossmodal_lines import (fit_wall,finite_intersection,image_line,
-    sample_line,project_line,fit_lines,metrics,information,perturb,residual)
+    sample_line,project_line,fit_lines,metrics,information,perturb,residual,
+    lidar_bev_xy,polygon_roi_mask)
 from spade_calib.calibration.scene_consistency import voxel_return_indices
 
 
@@ -108,38 +109,133 @@ def draw(img,xyz,uv,X,K):
     return out
 
 
-def annotate(a):
-    # Matplotlib interactive backend required; never change raw image labels
-    # by snapping to a projected LiDAR line.
+def select_wall_roi(p, image_ids, uv, z, img, wall, previous_mask=None):
+    """Linked BEV + projected image ROI editor. No GT or pixel snapping."""
     import matplotlib.pyplot as plt
-    from matplotlib.path import Path as Polygon
+    from matplotlib.colors import Normalize
+    from matplotlib.lines import Line2D
+    if "agg"==plt.get_backend().lower() or "inline" in plt.get_backend().lower():
+        raise RuntimeError("Interactive Matplotlib backend required (e.g. MPLBACKEND=TkAgg)")
+    bev=lidar_bev_xy(p)
+    fig=plt.figure(figsize=(17,8))
+    grid=fig.add_gridspec(2,2,width_ratios=[1,1.6])
+    axb=fig.add_subplot(grid[:,0]);axi=fig.add_subplot(grid[0,1]);axr=fig.add_subplot(grid[1,1])
+    # Same metric color for each point in both views; matching IDs highlighted.
+    dist=np.linalg.norm(p,axis=1);norm=Normalize(0,max(float(np.percentile(dist,99)),1.))
+    axb.scatter(bev[:,0],bev[:,1],c=dist,cmap="turbo",norm=norm,s=3,alpha=.8)
+    axb.scatter([0],[0],marker="^",c="black",s=85,zorder=5)
+    axb.set_aspect("equal");axb.set_xlabel("Right = -LiDAR Y [m]")
+    axb.set_ylabel("Forward = LiDAR X [m]");axb.set_title("BEV: vehicle forward UP, right RIGHT")
+    axb.axhline(0,c=".5",lw=.6);axb.axvline(0,c=".5",lw=.6)
+    rgb=cv2.cvtColor(img,cv2.COLOR_BGR2RGB)
+    for ax in (axi,axr):
+        ax.imshow(rgb);ax.set_xlim(-.5,img.shape[1]-.5);ax.set_ylim(img.shape[0]-.5,-.5)
+        ax.set_axis_off()
+    # Draw far-to-near; all depth-valid points remain selectable, including
+    # potentially occluded points. A second BEV ROI can reject them.
+    order=np.argsort(z)[::-1]
+    axi.scatter(uv[order,0],uv[order,1],c=dist[image_ids[order]],cmap="turbo",
+                norm=norm,s=4,alpha=.75)
+    axi.set_title("Image + initial LiDAR projection: draw ROI here or in BEV")
+    axr.set_title("Raw image (reference only)")
+    if previous_mask is not None:
+        b=bev[previous_mask];q=uv[previous_mask[image_ids]]
+        axb.scatter(b[:,0],b[:,1],s=9,c="magenta",alpha=.65)
+        axi.scatter(q[:,0],q[:,1],s=10,c="magenta",alpha=.65)
+    sb=axb.scatter([],[],s=13,facecolors="none",edgecolors="lime",linewidths=.8,zorder=10)
+    si=axi.scatter([],[],s=16,facecolors="none",edgecolors="lime",linewidths=.9,zorder=10)
+    sr=axr.scatter([],[],s=9,c="lime",alpha=.7,zorder=10)
+    artists={key:ax.plot([],[],"w-o",lw=1.5,ms=4,markerfacecolor="lime",
+                          markeredgecolor="black",zorder=15)[0]
+             for key,ax in (("bev",axb),("image",axi))}
+    polygons={"bev":[],"image":[]}
+    state={"confirmed":False}
+    title=fig.suptitle("")
+    axes={axb:"bev",axi:"image"}
+    fig.subplots_adjust(left=.07,right=.98,top=.86,bottom=.08,wspace=.17,hspace=.25)
+
+    def refresh():
+        complete={k:v for k,v in polygons.items() if len(v)>=3}
+        mask=polygon_roi_mask(p,image_ids,uv,complete) if complete else np.zeros(len(p),bool)
+        sb.set_offsets(bev[mask]);sel=uv[mask[image_ids]]
+        si.set_offsets(sel);sr.set_offsets(sel)
+        for key,artist in artists.items():
+            v=np.asarray(polygons[key],float).reshape(-1,2)
+            if len(v)>=3: v=np.vstack((v,v[0]))
+            artist.set_data(v[:,0],v[:,1])
+        title.set_text(f"Wall {wall} | BEV vertices {len(polygons['bev'])} | image vertices {len(polygons['image'])} | selected {mask.sum()} points\n"
+                       "Left click: vertices (either panel; both = intersection) | Right click: undo in panel | R: reset | Enter: accept | Esc: cancel\n"
+                       "Green rings: linked selected points | Magenta: first wall | Pan/zoom toolbar OFF before drawing")
+        fig.canvas.draw_idle()
+        return mask
+
+    def on_click(event):
+        key=axes.get(event.inaxes)
+        if key is None or event.xdata is None or event.ydata is None: return
+        toolbar=getattr(fig.canvas,"toolbar",None)
+        if toolbar is not None and getattr(toolbar,"mode",""): return
+        if event.button==1:
+            polygons[key].append([float(event.xdata),float(event.ydata)])
+        elif event.button==3 and polygons[key]:
+            polygons[key].pop()
+        else: return
+        refresh()
+
+    def on_key(event):
+        if event.key in ("enter","return"):
+            if not any(len(v)>=3 for v in polygons.values()) or any(0<len(v)<3 for v in polygons.values()):
+                print("Draw at least one polygon with >=3 vertices; finish or undo partial polygons.",flush=True)
+                return
+            state["confirmed"]=True;fig.canvas.stop_event_loop()
+        elif event.key=="r":
+            for v in polygons.values(): v.clear()
+            refresh()
+        elif event.key=="escape":
+            fig.canvas.stop_event_loop()
+
+    cids=[fig.canvas.mpl_connect("button_press_event",on_click),
+          fig.canvas.mpl_connect("key_press_event",on_key),
+          fig.canvas.mpl_connect("close_event",lambda event:fig.canvas.stop_event_loop())]
+    refresh()
+    plt.show(block=False)
+    try: fig.canvas.start_event_loop(0)
+    finally:
+        for cid in cids: fig.canvas.mpl_disconnect(cid)
+        plt.close(fig)
+    if not state["confirmed"]: raise ValueError("Wall annotation cancelled")
+    chosen={k:v for k,v in polygons.items() if len(v)>=3}
+    return polygon_roi_mask(p,image_ids,uv,chosen),chosen
+
+
+def annotate(a):
+    # ROI display coordinates only; plane fitting always uses original LiDAR XYZ.
+    import matplotlib.pyplot as plt
     manifest,X,K,digest=load_data(a.data)
     xyz,scans,img=frame_data(a.data,manifest,a.frame)
-    if a.z_min>=a.z_max or a.near<=0: raise ValueError("Invalid annotation ROI settings")
-    # Use height-filtered LiDAR-only top view for both wall selections.
+    if a.z_min>=a.z_max or a.near<=0 or not 0<a.depth_min<a.depth_max:
+        raise ValueError("Invalid annotation ROI settings")
     visible=(xyz[:,2]>=a.z_min)&(xyz[:,2]<=a.z_max)
-    p=xyz[visible]
+    p=xyz[visible];source_scans=scans[visible]
     if len(p)<60: raise ValueError("Too few points after height filter")
-    selected=[];walls=[];polygons=[]
+    image_ids,uv,z=project_xyz(p,X,K,img.shape[1],img.shape[0],
+                             min_depth_m=a.depth_min,max_depth_m=a.depth_max)
+    if not len(image_ids):
+        raise ValueError("No projected points: inspect initializer, frame and camera index")
+    selected=[];walls=[];polygons=[];roi_selections=[];previous=None
     for i in range(2):
-        fig,ax=plt.subplots(figsize=(10,8))
-        sc=ax.scatter(p[:,0],p[:,1],c=p[:,2],s=2,cmap="viridis")
-        ax.set_aspect("equal");ax.set_xlabel("LiDAR forward X [m]");ax.set_ylabel("LiDAR left Y [m]")
-        ax.set_title(f"Wall {i+1}: polygon vertices, Enter to finish; zoom before selecting")
-        if selected:
-            q=selected[0];ax.scatter(q[:,0],q[:,1],s=3,c="red")
-        fig.colorbar(sc,ax=ax,label="LiDAR Z [m]")
-        plt.show(block=False)
-        vertices=np.asarray(plt.ginput(n=-1,timeout=0,show_clicks=True,
-                                       mouse_add=1,mouse_pop=3,mouse_stop=2))
-        plt.close(fig)
-        if len(vertices)<3: raise ValueError("Need at least 3 polygon vertices")
-        inside=visible.copy();inside[visible]=Polygon(np.vstack((vertices,vertices[0]))).contains_points(p[:,:2])
-        roi=xyz[inside]
+        inside,roi_views=select_wall_roi(p,image_ids,uv,z,img,i+1,previous)
+        roi=p[inside]
         n,d,keep,report=fit_wall(roi,seed=a.seed+i,threshold=a.plane_threshold,min_inliers=a.min_inliers)
-        q=roi[keep];report["scan_count"]=len(np.unique(scans[inside][keep]))
+        q=roi[keep];report["scan_count"]=len(np.unique(source_scans[inside][keep]))
+        previous=np.zeros(len(p),bool);previous[np.flatnonzero(inside)[keep]]=True
         print(f"Wall {i+1}: {report}",flush=True)
-        selected.append(q);walls.append((n,d,report));polygons.append(vertices.tolist())
+        selected.append(q);walls.append((n,d,report))
+        # Preserve original LiDAR XY polygon field for BEV selections; image
+        # selections have no equivalent planar LiDAR XY polygon.
+        v=np.asarray(roi_views["bev"],float) if "bev" in roi_views else None
+        polygons.append(np.column_stack((v[:,1],-v[:,0])).tolist() if v is not None else None)
+        roi_selections.append(dict(polygons=roi_views,roi_points=int(inside.sum()),
+                                   bev_convention="horizontal=-Y, vertical=X"))
     endpoints,geometry=finite_intersection(walls[0][0],walls[0][1],selected[0],
         walls[1][0],walls[1][1],selected[1],near=a.near,min_length=a.min_length)
     # Show approximate initial projection on a SEPARATE panel, label raw image.
@@ -157,6 +253,8 @@ def annotate(a):
     # use explicit event handler to reject all clicks outside raw panel.
     clicks=[]
     def click(event):
+        toolbar=getattr(fig.canvas,"toolbar",None)
+        if toolbar is not None and getattr(toolbar,"mode",""): return
         if event.inaxes is axes[0] and event.button==1 and event.xdata is not None:
             clicks.append([event.xdata,event.ydata])
             axes[0].plot(event.xdata,event.ydata,"g+");fig.canvas.draw_idle()
@@ -186,9 +284,10 @@ def annotate(a):
         raise ValueError("Feature already annotated at this frame")
     rid=f"line_{len(doc['records']):04d}"
     rec=dict(id=rid,frame=a.frame,feature=a.feature,split=a.split,xyz_lidar=endpoints.tolist(),
-             uv_image=uv.tolist(),geometry=geometry,polygons_xy=polygons,
+             uv_image=uv.tolist(),geometry=geometry,polygons_xy=polygons,roi_selections=roi_selections,
              settings=dict(z_min=a.z_min,z_max=a.z_max,plane_threshold=a.plane_threshold,
-                           min_inliers=a.min_inliers,near=a.near,min_length=a.min_length,seed=a.seed),
+                           min_inliers=a.min_inliers,near=a.near,min_length=a.min_length,seed=a.seed,
+                           depth_min=a.depth_min,depth_max=a.depth_max),
              planes=[dict(normal=n.tolist(),offset_m=d,**r) for n,d,r in walls],
              manual_identity_confirmed=True)
     support=a.data/"line_support";support.mkdir(exist_ok=True)
@@ -274,6 +373,7 @@ def main():
     q.add_argument("--frame",type=int,required=True);q.add_argument("--feature",required=True)
     q.add_argument("--split",choices=["train","test"],default="train")
     q.add_argument("--z-min",type=float,default=-1.);q.add_argument("--z-max",type=float,default=4.5)
+    q.add_argument("--depth-min",type=float,default=.5);q.add_argument("--depth-max",type=float,default=65.,help="Optical depth gate for image ROI projection only")
     q.add_argument("--plane-threshold",type=float,default=.08);q.add_argument("--min-inliers",type=int,default=30)
     q.add_argument("--near",type=float,default=.7);q.add_argument("--min-length",type=float,default=.75)
     q.add_argument("--seed",type=int,default=17);q.set_defaults(func=annotate)

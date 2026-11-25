@@ -165,3 +165,40 @@ def fit_lines(records,X0,K,*,mode="full",sigma_px=2.,max_rotation_deg=5.,
         success=bool(sol.success and stats["nonpositive_or_near_samples"]==0),
         train=stats,information=info,
         full_rank=(info["effective_rank"]==6))
+
+
+def lidar_bev_xy(xyz):
+    """Vehicle-oriented display only: horizontal right=-LiDAR Y, vertical forward=X."""
+    p=np.asarray(xyz,float)
+    if p.ndim!=2 or p.shape[1]!=3:
+        raise ValueError("Expected Nx3 LiDAR points")
+    return np.column_stack((-p[:,1],p[:,0]))
+
+
+def polygon_roi_mask(xyz, image_ids, image_uv, polygons):
+    """Intersect display-space ROI polygons; retain original LiDAR point identities.
+
+    A BEV polygon is in (-Y, X) display coordinates. Image polygon is in
+    original pixel coordinates projected with the frozen initializer.
+    Multiple views constrain the SAME original points, never 3D backprojection.
+    """
+    from matplotlib.path import Path
+    p=np.asarray(xyz,float);ids=np.asarray(image_ids);uv=np.asarray(image_uv,float)
+    if (p.ndim!=2 or p.shape[1]!=3 or ids.ndim!=1 or ids.dtype.kind not in "iu"
+            or uv.shape!=(len(ids),2) or np.any(ids<0) or np.any(ids>=len(p))
+            or len(np.unique(ids))!=len(ids)):
+        raise ValueError("Invalid linked ROI inputs")
+    mask=np.ones(len(p),bool)
+    for view,vertices in polygons.items():
+        v=np.asarray(vertices,float)
+        if v.ndim!=2 or v.shape[1]!=2 or len(v)<3 or not np.isfinite(v).all():
+            raise ValueError("Need at least three finite polygon vertices")
+        poly=Path(np.vstack((v,v[0])))
+        if view=="bev":
+            m=poly.contains_points(lidar_bev_xy(p))
+        elif view=="image":
+            m=np.zeros(len(p),bool);m[ids]=poly.contains_points(uv)
+        else:
+            raise ValueError("Unknown ROI view")
+        mask&=m
+    return mask

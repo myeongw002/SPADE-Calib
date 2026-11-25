@@ -37,3 +37,22 @@ do not yield calibrated covariance. Vertical lines alone may not
 constrain full 6DoF; do not equate solver success with identification.
 No HE/Ground fusion, no automatic matching, no W1/W21 causal ablation yet.
 Need physical paired supports and control experiments before M1/M2.
+
+
+## Linked ROI editor (updated)
+
+BEV is vehicle-oriented: display horizontal = -LiDAR Y (right),
+vertical = LiDAR X (forward). The original XYZ, calibration and plane
+fitting are unchanged. The editor displays BEV, initial projected
+LiDAR on image, and raw image simultaneously. Click polygon vertices
+in BEV or projected image; green highlights show the same original
+points in all views. If both polygons are drawn the selection is their
+intersection. Right click undoes last vertex in its panel, R clears
+both, Enter accepts, Esc cancels. Turn off toolbar pan/zoom before
+drawing. First wall inliers appear magenta for second wall. Image ROI
+uses the initial X only for selection; it may include occluded points.
+Use a BEV ROI to constrain depth or --depth-min/--depth-max (optical
+depth, image selection only). The raw image endpoints are annotated
+separately, never snapped to projected points. Prepared data and old
+annotations remain compatible; new annotations record both ROI polygons.
+No need to run prepare again.

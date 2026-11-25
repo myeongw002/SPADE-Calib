@@ -32,3 +32,20 @@ def test_x_only_exact_recovery_and_rank():
     assert r["success"]
     np.testing.assert_allclose(Y,X,atol=1e-7)
     assert information(Y,records,K)["effective_rank"]<6
+
+
+def test_linked_roi_orientation_and_original_point_identity():
+    from spade_calib.calibration.crossmodal_lines import lidar_bev_xy,polygon_roi_mask
+    xyz=np.array([[5.,2.,0.],[5.,-2.,1.],[9.,-2.,1.],[6.,-2.,2.],[2.,0.,0.]])
+    bev=lidar_bev_xy(xyz)
+    np.testing.assert_array_equal(bev,[[-2,5],[2,5],[2,9],[2,6],[0,2]])
+    ids=np.array([3,0,1])
+    uv=np.array([[100,100],[200,200],[105,105]],float)
+    poly_bev=[[1,4],[3,4],[3,7],[1,7]]
+    poly_img=[[95,95],[102,95],[102,102],[95,102]]
+    np.testing.assert_array_equal(polygon_roi_mask(xyz,ids,uv,{"bev":poly_bev}),
+                                  [False,True,False,True,False])
+    np.testing.assert_array_equal(polygon_roi_mask(xyz,ids,uv,{"image":poly_img}),
+                                  [False,False,False,True,False])
+    np.testing.assert_array_equal(polygon_roi_mask(xyz,ids,uv,{"image":poly_img,"bev":poly_bev}),
+                                  [False,False,False,True,False])
