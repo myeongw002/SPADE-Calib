@@ -85,10 +85,17 @@ def run_prepare_sfm_plane_matches(args) -> int:
                                                args.kitti_times)
     patch_settings = PatchSettings(
         voxel_size_m=args.voxel_m, max_sampled_points=args.max_lidar_points,
+        refine_with_full_points=not args.voxel_only_refinement,
         max_planes=args.max_planes, ransac_iterations=args.ransac_iterations,
         distance_threshold_m=args.plane_threshold_m,
         min_inliers=args.min_plane_inliers,
         connectivity_radius_m=args.connectivity_radius_m,
+        orientation_aware=not args.no_orientation_aware,
+        diverse_normal_min_angle_deg=args.diverse_normal_min_angle_deg,
+        novel_normal_min_angle_deg=args.novel_normal_min_angle_deg,
+        local_normal_neighbors=args.local_normal_neighbors,
+        local_normal_max_rmse_m=args.local_normal_max_rmse_m,
+        diverse_hypotheses_per_patch=args.diverse_hypotheses_per_patch,
     )
     patches, patch_info = extract_lidar_patches(cloud, ids, patch_settings)
     matching_settings = MatchSettings(
