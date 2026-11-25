@@ -109,7 +109,8 @@ def solve_local_ba(segments,X0,scales,he,*,kind="visual",fixed_local=None,
                    max_log_scale=.15,rotation_multiplier=1.,he_block_robust=False,
                    information=False,information_maxiter=10000,
                    line_records=None,line_K=None,line_weight=0.,line_sigma_px=2.,
-                   scale_diagnostic_state=None):
+                   scale_diagnostic_state=None,archive_cost_only=False,
+                   initial_parameters=None,fixed_scales=None):
     """Common initial state for H0/H1/H2; sparse FD + LSMR, no pose priors.
 
     Per-segment mean visual and motion losses, robustified before weights.
@@ -215,9 +216,11 @@ def solve_local_ba(segments,X0,scales,he,*,kind="visual",fixed_local=None,
         # Five samples per 3D segment, signed pixel distance + depth barrier.
         J[row:,:6]=1;row+=len(line_residual(X0,line_records,line_K,line_sigma_px))
     if row!=J.shape[0]: raise RuntimeError("BA sparsity row mismatch")
+    if archive_cost_only and scale_diagnostic_state is None:
+        raise ValueError("Archive cost check requires archived state")
     if scale_diagnostic_state is not None:
         # Diagnostic only: no optimization and no new data selection.
-        if not joint or not free or use_lines or information:
+        if not joint or not free or use_lines or information or initial_parameters is not None or fixed_scales is not None:
             raise ValueError("S1 requires joint free BA without M1 lines or I mode")
         at=np.asarray(scale_diagnostic_state,float)
         if at.shape!=(dim,) or not np.isfinite(at).all() or np.any(at<lo-1e-8) or np.any(at>hi+1e-8):
@@ -225,6 +228,8 @@ def solve_local_ba(segments,X0,scales,he,*,kind="visual",fixed_local=None,
         import logging
         log=logging.getLogger(__name__)
         initial,_=evaluate(x0,True);final,local=evaluate(at,True)
+        if archive_cost_only:
+            return dict(diagnostic_only=True,initial=initial,final=final),local
         info={}
         for label,state in (("common_initial",x0),("archived_solution",at)):
             info[label]={}
@@ -237,9 +242,38 @@ def solve_local_ba(segments,X0,scales,he,*,kind="visual",fixed_local=None,
         return dict(diagnostic_only=True,initial=initial,final=final,scale_information=info,
                     active_parameter_indices=active.tolist(),variables=dim,jacobian_nnz=int(J.nnz),
                     warning="Archived solution; no refit. Raw and transformed robust Jacobians; unconstrained local tangent, not statistical covariance."),local
-    sol=least_squares(evaluate,x0,jac_sparsity=J.tocsr(),tr_solver="lsmr",x_scale="jac",
-                      bounds=(lo,hi),max_nfev=max_nfev,ftol=1e-7,xtol=1e-7,gtol=1e-7)
-    initial,_=evaluate(x0,True);final,local=evaluate(sol.x,True)
+    # S1-R: fixed scales are removed from the optimization, never approximated
+    # by a tight prior or by changing the reference metric normalization.
+    start=x0.copy() if initial_parameters is None else np.asarray(initial_parameters,float).copy()
+    if start.shape!=(dim,) or not np.isfinite(start).all():
+        raise ValueError("Invalid BA initial parameters")
+    fit_mask=np.ones(dim,bool)
+    outside_scale_bounds=[]
+    if fixed_scales is not None:
+        if not joint or information:
+            raise ValueError("Fixed scales require joint motion BA without I diagnostics")
+        fs=np.asarray(fixed_scales,float)
+        if fs.shape!=(K,) or not np.isfinite(fs).all() or np.any(fs<=0):
+            raise ValueError("Invalid fixed absolute scales")
+        start[6:base]=np.log(fs/np.asarray(scales))
+        fit_mask[6:base]=False
+        outside_scale_bounds=np.flatnonzero(abs(start[6:base])>max_log_scale+1e-8).tolist()
+    if np.any(start[fit_mask]<lo[fit_mask]-1e-8) or np.any(start[fit_mask]>hi[fit_mask]+1e-8):
+        raise ValueError("Initial free parameter outside original bounds")
+    start[fit_mask]=np.clip(start[fit_mask],lo[fit_mask],hi[fit_mask])
+    if fixed_scales is None:
+        sol=least_squares(evaluate,start,jac_sparsity=J.tocsr(),tr_solver="lsmr",x_scale="jac",
+                          bounds=(lo,hi),max_nfev=max_nfev,ftol=1e-7,xtol=1e-7,gtol=1e-7)
+    else:
+        def expand(v):
+            x=start.copy();x[fit_mask]=v;return x
+        sol=least_squares(lambda v:evaluate(expand(v)),start[fit_mask],
+                          jac_sparsity=J.tocsr()[:,fit_mask],tr_solver="lsmr",x_scale="jac",
+                          bounds=(lo[fit_mask],hi[fit_mask]),max_nfev=max_nfev,ftol=1e-7,xtol=1e-7,gtol=1e-7)
+        sol.x=expand(sol.x)
+        active_full=np.zeros(dim,int);active_full[fit_mask]=sol.active_mask
+        sol.active_mask=active_full
+    initial,_=evaluate(start,True);final,local=evaluate(sol.x,True)
     # No false covariance or global rank claims from a sparse local solver.
     ok=bool(sol.success and all(r["nonpositive_depth"]==0 for r in final["segments"])
             and (not use_lines or final["line_metrics"]["nonpositive_or_near_samples"]==0))
@@ -260,7 +294,7 @@ def solve_local_ba(segments,X0,scales,he,*,kind="visual",fixed_local=None,
         log=logging.getLogger(__name__)
         info={}
         mask=np.ones(J.shape[0],bool);mask[ground_rows]=False
-        for label,at in (("common_initial",x0),("solution",sol.x)):
+        for label,at in (("common_initial",start),("solution",sol.x)):
             info[label]={}
             for mode in ("raw","robust"):
                 log.info("Information %s %s: sparse differentiation and nuisance projection",label,mode)
@@ -283,5 +317,7 @@ def solve_local_ba(segments,X0,scales,he,*,kind="visual",fixed_local=None,
                 rotation_multiplier=float(rotation_multiplier),he_block_robust=bool(he_block_robust),
                 ground_weight=float(ground_weight),line_weight=float(line_weight),line_sigma_px=float(line_sigma_px),
                 message=str(sol.message),nfev=int(sol.nfev),optimality=float(sol.optimality),
-                bound_hit=bool(np.any(sol.active_mask)),variables=dim,jacobian_nnz=int(J.nnz),
+                bound_hit=bool(np.any(sol.active_mask)),variables=int(fit_mask.sum()),jacobian_nnz=int(J.tocsr()[:,fit_mask].nnz),
+                fixed_scales=None if fixed_scales is None else np.asarray(fixed_scales,float).tolist(),
+                fixed_scale_outside_original_bounds=outside_scale_bounds,
                 initial=initial,final=final),local

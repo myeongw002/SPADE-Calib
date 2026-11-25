@@ -117,6 +117,8 @@ def main(argv=None):
     p.add_argument("--extended-ablation",action="store_true",help="Also run ground-off and rotation attenuation controls")
     p.add_argument("--ij",action="store_true",help="Run I observability and J virtual moment experiments instead of H")
     p.add_argument("--s1",action="store_true",help="S1: diagnose scale coupling at archived H1/H2 states without refitting")
+    p.add_argument("--s1r",action="store_true",help="S1-R: fixed-scale oracle and matched warm-start controls")
+    p.add_argument("--scale-bias-pct",type=float,default=1.,help="S1-R: common multiplicative oracle-scale perturbation in percent")
     p.add_argument("--line-data",type=Path,help="M1 mode: prepared M0 manifest and annotations")
     p.add_argument("--line-weights",type=float,nargs="+",default=[.01,.1,1.])
     p.add_argument("--line-sigma-px",type=float,default=2.)
@@ -153,10 +155,13 @@ def main(argv=None):
     if (args.window<1 or args.window%2==0 or args.max_tracks_per_view<12 or args.ground_cap<6
             or not 0<args.min_parallax_deg<90 or args.seed<0 or args.max_nfev<10):
         raise ValueError("Invalid BA sampling/iteration settings")
-    if args.s1 and (not args.reference_ba or args.ij or args.line_data or args.ablation_windows
+    if (args.s1 or args.s1r) and (not args.reference_ba or args.ij or args.line_data or args.ablation_windows
                      or args.extended_ablation or args.image_dir or args.window!=5 or args.scene_kind!="point"
                      or args.ground_weight<=0 or args.information_maxiter<1):
         raise ValueError("S1 requires original --reference-ba H, W5 point, positive ground; no other modes")
+    if args.s1r and (args.s1 or not args.gt_poses or not args.gt_calib
+                    or not np.isfinite(args.scale_bias_pct) or not 0<args.scale_bias_pct<100):
+        raise ValueError("S1-R needs GT poses/calibration for oracle evaluation and a positive bias below 100%")
     if args.line_data:
         if args.ij or args.ablation_windows or args.extended_ablation or args.image_dir or not args.reference_ba or args.window!=5 or args.scene_kind!="point":
             raise ValueError("M1 requires --reference-ba, W5 point factors; no H/IJ/projection flags")
@@ -405,7 +410,7 @@ def main(argv=None):
         LOG.info("%s: success=%s, nfev=%d, %.1fs",name,result["success"],result["nfev"],result["elapsed_s"])
         return local
     zeros=[np.zeros(s.size) for s in segments]
-    if args.s1:
+    if args.s1 or args.s1r:
         ref=args.reference_ba
         prior=json.loads((ref/"summary.json").read_text())
         if (not np.allclose(prior["baseline"]["T_camera_lidar"],X,atol=1e-9)
@@ -445,7 +450,8 @@ def main(argv=None):
                             raise ValueError(f"S1 archived state mismatch: {name}, {k}, {key}")
                     x.append(local)
             result,_=solve_local_ba(segments,X,scales,he,kind=kind,**opts,
-                      scale_diagnostic_state=np.concatenate(x),information_maxiter=args.information_maxiter)
+                      scale_diagnostic_state=np.concatenate(x),information_maxiter=args.information_maxiter,
+                      archive_cost_only=args.s1r)
             # Exact objective reproduction gate: do not interpret information
             # if the current code/support differs from archived H.
             for state in ("initial","final"):
@@ -455,8 +461,67 @@ def main(argv=None):
             result["reference_cost_verified"]=True
             result["source_active_bounds_reported"]=bool(r.get("bound_hit"))
             if gt is not None: result["gt_evaluation"]=evaluate_camera_lidar(Y,gt)
-            summary["experiments"][name]=result
-            write_json(args.out/"summary.json",summary)
+            if args.s1r:
+                # Both references are in the ORIGINAL gauge and units:
+                # the fixed baseline coordinate must match GT for gauge oracle;
+                # least-squares alternative fits all archived camera centers.
+                # GT is used only in this explicitly labeled oracle mode.
+                GR,GT=gt_world
+                gauge=[];ls=[];refs=[]
+                for k,s in enumerate(segments):
+                    R,t,P=s.state(x[3+k])
+                    f=s.frames;a=s.anchor;j,d=s.gauge
+                    if f.min()<0 or f.max()>=len(GR): raise ValueError("GT frame out of range")
+                    tg=(GT[f]-GT[f[a]])@GR[f[a]]
+                    g=float(tg[j,d]/s.t[j,d])
+                    l=float(np.sum(t*tg)/np.sum(t*t))
+                    if not np.isfinite([g,l]).all() or min(g,l)<=0:
+                        raise ValueError(f"No positive reference scale for segment {k}")
+                    gauge.append(scales[k]*g);ls.append(scales[k]*l)
+                    rms=lambda ratio:float(np.sqrt(np.mean(np.sum((ratio*t-tg)**2,axis=1))))
+                    refs.append(dict(segment=k,gauge_frame=int(f[j]),axis=int(d),
+                        reference_gauge_scale=float(scales[k]*g),reference_ls_scale=float(scales[k]*l),
+                        archived_scale=float(est[k]),gauge_baseline_ref_m=float(s.t[j,d]),
+                        gauge_baseline_gt_m=float(tg[j,d]),archived_center_rmse_m=rms(est[k]/scales[k]),
+                        gauge_center_rmse_m=rms(g),ls_center_rmse_m=rms(l),
+                        reference_disagreement_relative=float(g/l-1)))
+                gauge=np.asarray(gauge);ls=np.asarray(ls)
+                result["reference_scales"]=refs
+                result["trajectory_gt"]=trajectory_metrics([s.state(x[3+k]) for k,s in enumerate(segments)],est/scales)
+                result["reference_only"]=True
+                summary["experiments"][name+"_archive"]=result
+                summary["s1r_warning"]="GT scale oracles are diagnostic only. All refits share archived X/local BA warm start and original bounds on free variables. Fixed oracle scale may exceed original free-scale bounds; flagged, not clipped. Gauge and LS references differ under nonuniform SfM error."
+                write_json(args.out/"summary.json",summary)
+                delta=args.scale_bias_pct/100
+                arms_r=(("free_warm",None),("fixed_archived",est),("fixed_gauge_GT",gauge),
+                        ("fixed_ls_GT",ls),("fixed_gauge_GT_minus",gauge*(1-delta)),
+                        ("fixed_gauge_GT_plus",gauge*(1+delta)))
+                for label,fs in arms_r:
+                    arm_name=name+"_"+label
+                    LOG.info("S1-R %s",arm_name);start=perf_counter()
+                    res,local=solve_local_ba(segments,X,scales,he,kind=kind,**opts,
+                        initial_parameters=np.concatenate(x),fixed_scales=fs)
+                    Ynew=np.asarray(res["final"]["T_camera_lidar"])
+                    snew=np.asarray(res["final"]["scales"])
+                    states=[s.state(v) for s,v in zip(segments,local)]
+                    res["gt_evaluation"]=evaluate_camera_lidar(Ynew,gt)
+                    res["trajectory_gt"]=trajectory_metrics(states,snew/scales)
+                    res["scale_relative_error_to_gauge"]=(snew/gauge-1).tolist()
+                    res["scale_relative_error_to_ls"]=(snew/ls-1).tolist()
+                    res["elapsed_s"]=perf_counter()-start
+                    res["source_arm"]=name;res["gt_scale_used"]=label.startswith("fixed_gauge_GT") or label=="fixed_ls_GT"
+                    summary["experiments"][arm_name]=res
+                    target=args.out/arm_name;target.mkdir()
+                    for k,(seg,v,(R,t,P)) in enumerate(zip(segments,local,states)):
+                        np.savez_compressed(target/f"segment_{k:02d}.npz",frames=seg.frames,
+                            camera_R_anchor=R,camera_t_anchor_ref_metric=t,landmark_xyz_ref_metric=P,
+                            point_ids=seg.point_ids,scale_ref=scales[k],scale_est=snew[k],local_parameters=v,
+                            obs_camera_index=seg.obs_cam,obs_landmark_index=seg.obs_pt,obs_uv=seg.uv)
+                    write_json(args.out/"summary.json",summary)
+                    LOG.info("%s: success=%s, nfev=%d, %.1fs",arm_name,res["success"],res["nfev"],res["elapsed_s"])
+            else:
+                summary["experiments"][name]=result
+                write_json(args.out/"summary.json",summary)
         return 0
     if args.line_data:
         # Sequential H2 baseline (the exact M0 initializer), not a refit.
