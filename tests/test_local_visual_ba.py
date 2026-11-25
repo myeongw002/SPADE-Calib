@@ -58,3 +58,16 @@ def test_ba_decreases_pixel_error_with_perturbed_landmarks():
     fit,_=solve_local_ba([seg],X,[1.],HandEyeSettings(),kind="visual",max_nfev=30)
     assert fit["final"]["cost"]<fit["initial"]["cost"]*.01
     assert fit["final"]["segments"][0]["nonpositive_depth"]==0
+
+
+def test_duplicate_landmark_observations_keep_lowest_error_and_measured_pixel(tmp_path):
+    from spade_calib.io.colmap_observations import unique_view_observations
+    f=tmp_path/"images.txt"
+    f.write_text("1 1 0 0 0 0 0 0 1 000000.png\n20 40 42 22 41 42 30 50 9 23 41 42\n")
+    _,ids,uv=load_observations(f,{1})[1]
+    p,pixels,removed=unique_view_observations(ids,uv,np.array([2.,.2,.5,.2]))
+    assert removed==2
+    np.testing.assert_array_equal(p,[42,9])
+    np.testing.assert_array_equal(pixels,[[22.,41.],[30.,50.]])
+    p,pixels,removed=unique_view_observations(np.array([],int),np.empty((0,2)),np.empty(0))
+    assert removed==0 and pixels.shape==(0,2)

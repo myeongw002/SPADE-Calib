@@ -90,3 +90,24 @@ def project(xyz,params):
     r2=x*x+y*y;rad=1+k1*r2+k2*r2*r2
     return np.column_stack((fx*(x*rad+2*p1*x*y+p2*(r2+2*x*x))+cx,
                             fy*(y*rad+p1*(r2+2*y*y)+2*p2*x*y)+cy))
+
+
+def unique_view_observations(point_indices, pixels, errors):
+    """One observation per landmark in a view, chosen by initial pixel error.
+
+    Call AFTER the positive-depth and reprojection gate. Preserve measured
+    pixels (no averaging), choose earliest row on exact error ties, and
+    return the number of removed duplicate observations. No GT is used.
+    This is a fixed input-cleaning rule, not a claim of physical identity.
+    """
+    p=np.asarray(point_indices)
+    uv=np.asarray(pixels,dtype=float)
+    e=np.asarray(errors,dtype=float)
+    if (p.ndim!=1 or p.dtype.kind not in "iu" or uv.shape!=(len(p),2)
+            or e.shape!=(len(p),) or not np.isfinite(uv).all()
+            or not np.isfinite(e).all() or np.any(e<0)):
+        raise ValueError("Invalid per-view observations")
+    order=np.lexsort((np.arange(len(p)),e,p))
+    _,first=np.unique(p[order],return_index=True)
+    keep=np.sort(order[first])
+    return p[keep],uv[keep],int(len(p)-len(keep))

@@ -68,3 +68,22 @@ and per-arm segment NPZ (refined local pose/landmark arrays, observation IDs
 and pixels, reference and optimized scales). For actual metric anchor-local
 positions multiply stored ref_metric positions by scale_est/scale_ref.
 Projection is evaluation-only on original A0 map/single scan.
+
+
+## Retry after duplicate COLMAP observation error
+
+Multiple measured features in one image may reference the same landmark.
+After the original depth and 3 px gates, keep exactly one measured
+observation per (image, landmark), using minimum original reprojection
+error and earliest row on ties. No pixels are synthesized or averaged.
+The cleaned observation graph is fixed across all H arms and the removal
+counts are written per segment and frame. This does not prove which
+feature is physically correct and may favor the original SfM solution.
+
+Run `bash scripts/experiments/run_h_all.sh` from the project root in the
+active environment. It checks existing factor archives (summary, settings,
+NPZ contents and shapes); reuses valid ones, creates a new unique directory
+instead of overwriting incomplete factors or BA outputs, and runs 07, 09,
+10 sequentially even if one fails. Nonzero final exit status indicates
+at least one failed sequence. Override KITTI, CENTER_STRIDE or VOXEL with
+environment variables. Output locations and failures are printed in logs.

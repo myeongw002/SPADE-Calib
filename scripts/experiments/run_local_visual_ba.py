@@ -14,7 +14,7 @@ from run_scene_consistency import load_ground
 from run_segment_ground import read_xyz_ply,write_json
 from spade_calib.calibration.local_visual_ba import LocalBA,solve_local_ba
 from spade_calib.io.colmap import resolve_colmap_images,load_registered_images
-from spade_calib.io.colmap_observations import load_cameras,load_observations,camera_parameters,project
+from spade_calib.io.colmap_observations import load_cameras,load_observations,camera_parameters,project,unique_view_observations
 from spade_calib.io.kitti import load_kitti_trajectory_data,frame_id_from_name
 from spade_calib.handeye.solver import HandEyeSettings
 from spade_calib.selection.scale_segmentation import validate_extrinsic
@@ -32,6 +32,7 @@ def build_local(folder,ground_folder,match,frames,anchor,R,t,intr,observations,
         raise ValueError("Invalid archived SfM points")
     order=np.argsort(ids);ids=ids[order];P=P[order]
     obs=[]
+    duplicate_counts=[]
     for i,(pids,uv) in enumerate(observations):
         j=np.searchsorted(ids,pids);ok=j<len(ids)
         j=j[ok];uv=uv[ok];pids=pids[ok]
@@ -39,10 +40,14 @@ def build_local(folder,ground_folder,match,frames,anchor,R,t,intr,observations,
         q=(P[j]-t[i])@R[i]
         error=np.linalg.norm(project(q,np.broadcast_to(intr[i],(len(q),8)))-uv,axis=1)
         ok=(q[:,2]>.05)&(error<=3.)
-        j=j[ok];uv=uv[ok]
-        if len(np.unique(j))!=len(j):
-            raise ValueError("Duplicate landmark observation within image")
+        j,uv,removed=unique_view_observations(j[ok],uv[ok],error[ok])
+        duplicate_counts.append(removed)
+        if removed:
+            LOG.debug("Frame %d: removed %d duplicate landmark observations",int(frames[i]),removed)
         obs.extend((i,int(p),u) for p,u in zip(j,uv))
+    if sum(duplicate_counts):
+        LOG.info("Anchor %d: removed %d duplicate observations across %d views",
+                 int(frames[anchor]),sum(duplicate_counts),sum(c>0 for c in duplicate_counts))
     if not obs: raise ValueError("No actual feature observations survive archive/reprojection gate")
     oc=np.array([v[0] for v in obs],int);op=np.array([v[1] for v in obs],int)
     uv=np.stack([v[2] for v in obs])
@@ -87,6 +92,8 @@ def build_local(folder,ground_folder,match,frames,anchor,R,t,intr,observations,
     report=dict(selected_frames=frames.tolist(),anchor_frame=int(frames[anchor]),
                 gauge_frame=int(frames[local.gauge[0]]),gauge_translation_axis=local.gauge[1],
                 selected_landmarks=len(keep),observations=len(ci),
+                duplicate_observations_removed=int(sum(duplicate_counts)),
+                duplicate_counts_by_frame={str(int(f)):int(c) for f,c in zip(frames,duplicate_counts) if c},
                 min_observations_per_view=int(np.bincount(ci,minlength=len(frames)).min()),
                 eligible_ground_tracks=len(gj),selected_ground_point_ids=ids[chosen_ground].tolist(),
                 original_scale=float(scale))
