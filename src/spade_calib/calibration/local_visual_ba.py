@@ -13,6 +13,7 @@ from scipy.spatial.transform import Rotation
 from spade_calib.io.colmap_observations import project
 from spade_calib.calibration.scene_consistency import predicted_relative
 from spade_calib.calibration.segmented_ground import _robust
+from spade_calib.calibration.ba_diagnostics import marginal_information
 
 
 @dataclass
@@ -104,7 +105,8 @@ def solve_local_ba(segments,X0,scales,he,*,kind="visual",fixed_local=None,
                    visual_weight=1.,motion_weight=1.,ground_weight=.1,
                    sigma_px=1.,sigma_scene=.15,sigma_ground=.15,
                    max_nfev=80,pose_rotation_deg=5.,pose_translation_m=2.,
-                   max_log_scale=.15,rotation_multiplier=1.,he_block_robust=False):
+                   max_log_scale=.15,rotation_multiplier=1.,he_block_robust=False,
+                   information=False,information_maxiter=10000):
     """Common initial state for H0/H1/H2; sparse FD + LSMR, no pose priors.
 
     Per-segment mean visual and motion losses, robustified before weights.
@@ -137,23 +139,25 @@ def solve_local_ba(segments,X0,scales,he,*,kind="visual",fixed_local=None,
             X[:3,3]+=x[3:6];ratio=np.exp(x[6:base])
         local=[x[offsets[k]:offsets[k+1]] if free else fixed_local[k] for k in range(K)]
         return X,ratio,local
-    def evaluate(x,report=False):
+    def evaluate(x,report=False,raw=False):
         X,ratio,local=unpack(x);pieces=[];rows=[]
         for k,s in enumerate(segments):
             R,t,P=s.state(local[k]);v,z=s.visual(R,t,P)
             if free:
                 # Positive-depth barrier retained as separate residual row.
-                pieces.append(np.column_stack((_robust(v/sigma_px,"soft_l1"),np.maximum(.05-z,0)*100)).ravel()*np.sqrt(visual_weight/(K*len(v))))
+                pieces.append(np.column_stack(((v/sigma_px if raw else _robust(v/sigma_px,"soft_l1")),np.maximum(.05-z,0)*100)).ravel()*np.sqrt(visual_weight/(K*len(v))))
             if joint:
                 r=s.motion(R,t,X,ratio[k],kind,he,rotation_multiplier)
-                if kind=="he" and not he_block_robust:
-                    r=_robust(r,he.robust_loss)
-                else:
-                    if kind=="scene": r=r/sigma_scene
-                    r=r*np.sqrt(2/(np.hypot(1,np.linalg.norm(r,axis=1))+1))[:,None]
+                if kind=="scene": r=r/sigma_scene
+                if not raw:
+                    if kind=="he" and not he_block_robust:
+                        r=_robust(r,he.robust_loss)
+                    else:
+                        r=r*np.sqrt(2/(np.hypot(1,np.linalg.norm(r,axis=1))+1))[:,None]
                 pieces.append(r.ravel()*np.sqrt(motion_weight/(K*len(r))))
                 if ground_weight>0:
-                    pieces.append(_robust(np.array([s.ground(P,X,ratio[k])/sigma_ground]),"soft_l1")*np.sqrt(ground_weight/K))
+                    g=np.array([s.ground(P,X,ratio[k])/sigma_ground])
+                    pieces.append((g if raw else _robust(g,"soft_l1"))*np.sqrt(ground_weight/K))
             if report:
                 rows.append(dict(centers=len(s.frames),landmarks=len(P),observations=len(v),
                     reprojection_rmse_px=float(np.sqrt(np.mean(np.sum(v*v,axis=1)))),
@@ -169,7 +173,7 @@ def solve_local_ba(segments,X0,scales,he,*,kind="visual",fixed_local=None,
         return (dict(T_camera_lidar=X.tolist(),scales=(np.asarray(scales)*ratio).tolist(),
                      segments=rows,cost=float(.5*(r@r))),local) if report else r
     # Exact structural Jacobian sparsity including the ground centroid.
-    x0=np.zeros(dim);J=lil_matrix((len(evaluate(x0)),dim),dtype=np.int8);row=0
+    x0=np.zeros(dim);J=lil_matrix((len(evaluate(x0)),dim),dtype=np.int8);row=0;ground_rows=[]
     for k,s in enumerate(segments):
         off=offsets[k]
         if free:
@@ -183,7 +187,7 @@ def solve_local_ba(segments,X0,scales,he,*,kind="visual",fixed_local=None,
                 J[row:row+width,cols]=1;row+=width
             if ground_weight>0:
                 cols=np.r_[glob,s.pt_cols[s.ground_ids].ravel()+off] if free else glob
-                J[row,cols]=1;row+=1
+                J[row,cols]=1;ground_rows.append(row);row+=1
     if row!=J.shape[0]: raise RuntimeError("BA sparsity row mismatch")
     sol=least_squares(evaluate,x0,jac_sparsity=J.tocsr(),tr_solver="lsmr",x_scale="jac",
                       bounds=(lo,hi),max_nfev=max_nfev,ftol=1e-7,xtol=1e-7,gtol=1e-7)
@@ -200,7 +204,32 @@ def solve_local_ba(segments,X0,scales,he,*,kind="visual",fixed_local=None,
                                        side=int(sol.active_mask[j]),value=float(sol.x[j])))
     global_active=[dict(component=int(j),side=int(sol.active_mask[j]),value=float(sol.x[j]))
                    for j in range(base) if sol.active_mask[j]]
+    info=None
+    if information:
+        if not joint or not free: raise ValueError("Information requires joint free BA")
+        import logging
+        log=logging.getLogger(__name__)
+        info={}
+        mask=np.ones(J.shape[0],bool);mask[ground_rows]=False
+        for label,at in (("common_initial",x0),("solution",sol.x)):
+            info[label]={}
+            for mode in ("raw","robust"):
+                log.info("Information %s %s: sparse differentiation and nuisance projection",label,mode)
+                # Public SciPy API: a one-evaluation unconstrained call
+                # evaluates the 3-point Jacobian at the specified state.
+                jac=least_squares(lambda x:evaluate(x,raw=(mode=="raw")),at,
+                                  jac="3-point",jac_sparsity=J.tocsr(),max_nfev=1).jac
+                result=marginal_information(jac,at[:3],maxiter=information_maxiter)
+                entry={"all_nuisance_free":result}
+                if label=="solution" and ground_rows:
+                    entry["remove_ground_same_state"]=marginal_information(jac[mask],at[:3],maxiter=information_maxiter)
+                if label=="solution" and np.any(sol.active_mask[6:]):
+                    entry["active_nuisance_fixed"]=marginal_information(jac,at[:3],
+                        fixed_nuisance=sol.active_mask[6:]!=0,maxiter=information_maxiter)
+                info[label][mode]=entry
+        info["warning"]="Raw uses linear whitened weighted residuals; robust uses derivative of solver's transformed residual, not exact robust Hessian or frozen IRLS. Unconstrained tangent; active nuisance conditional fixes only active nuisance. Active extrinsic bounds are reported separately."
     return dict(success=ok,solver_converged=bool(sol.success),status=int(sol.status),
+                information=info,
                 active_pose_bounds=active,active_global_bounds=global_active,
                 rotation_multiplier=float(rotation_multiplier),he_block_robust=bool(he_block_robust),
                 ground_weight=float(ground_weight),

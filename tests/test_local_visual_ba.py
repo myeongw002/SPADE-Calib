@@ -89,3 +89,54 @@ def test_rotation_attenuation_and_ground_off():
         fit,_=solve_local_ba([seg],X,[1.],he,kind=kind,ground_weight=0.,
                               rotation_multiplier=.5,he_block_robust=True,max_nfev=20)
         assert fit["success"] and fit["final"]["cost"]<1e-15
+
+
+def test_marginal_information_matches_dense_projection():
+    from spade_calib.calibration.ba_diagnostics import marginal_information
+    from scipy.sparse import csr_matrix
+    rng=np.random.default_rng(13)
+    A=rng.normal(size=(50,8));A[:,7]=A[:,0]+A[:,1]
+    B=rng.normal(size=(50,6));B[:,5]=A[:,0]
+    J=np.column_stack((B,A))
+    result=marginal_information(csr_matrix(J))
+    units=np.r_[np.full(3,np.deg2rad(1.)),np.full(3,.1)]
+    E=(B-A@np.linalg.pinv(A)@B)*units
+    np.testing.assert_allclose(result["information_matrix"],E.T@E,atol=1e-10)
+    assert result["reliable"] and result["effective_rank"]==5
+    fixed=np.zeros(8,bool);fixed[0]=True;fixed[7]=True
+    r=marginal_information(csr_matrix(J),fixed_nuisance=fixed)
+    C=A[:,~fixed]
+    E=(B-C@np.linalg.pinv(C)@B)*units
+    np.testing.assert_allclose(r["information_matrix"],E.T@E,atol=1e-10)
+
+
+def test_virtual_moments_preserve_pooled_and_shuffle():
+    from spade_calib.calibration.ba_diagnostics import moment_factors,moments_from_factors,virtual_moments
+    rng=np.random.default_rng(14)
+    fs=[]
+    for n in (5,8):
+        mu=rng.normal(size=(n,3))
+        A=rng.normal(size=(n,3,3));C=A@A.transpose(0,2,1)
+        F=moment_factors(mu,C)
+        a,b=moments_from_factors(F)
+        np.testing.assert_allclose(a,mu,atol=1e-10)
+        np.testing.assert_allclose(b,C,atol=1e-10)
+        fs.append(F)
+    controls,meta=virtual_moments(fs,shuffle_repeats=2)
+    for name in ("J3_isotropic","J4_pooled","J6_real_mu","J5_shuffle_0","J5_shuffle_1"):
+        np.testing.assert_allclose(meta["controls"][name]["mean_second_moment_trace"],
+                                   meta["reference"]["mean_second_moment_trace"],atol=1e-10)
+    for f,g in zip(fs,controls["J5_shuffle_0"]):
+        np.testing.assert_array_equal(g,f[meta["permutations"]["J5_shuffle_0"][0 if len(f)==5 else 1]])
+
+
+def test_information_with_ground_on_and_off():
+    seg,X=synthetic()
+    for weight in (0.,.1):
+        r,_=solve_local_ba([seg],X,[1.],HandEyeSettings(),kind="scene",
+                           ground_weight=weight,information=True,max_nfev=20)
+        assert r["success"]
+        for mode in ("raw","robust"):
+            entry=r["information"]["solution"][mode]
+            assert len(entry["all_nuisance_free"]["singular_values"])==6
+            assert ("remove_ground_same_state" in entry)==(weight>0)

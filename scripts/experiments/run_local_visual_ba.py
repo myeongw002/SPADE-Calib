@@ -16,6 +16,7 @@ from scipy.spatial import cKDTree
 from run_scene_consistency import load_ground
 from run_segment_ground import read_xyz_ply,write_json
 from spade_calib.calibration.local_visual_ba import LocalBA,solve_local_ba
+from spade_calib.calibration.ba_diagnostics import virtual_moments,moment_factors
 from spade_calib.io.colmap import resolve_colmap_images,load_registered_images
 from spade_calib.io.colmap_observations import load_cameras,load_observations,camera_parameters,project,unique_view_observations
 from spade_calib.io.kitti import load_kitti_trajectory_data,frame_id_from_name
@@ -113,6 +114,10 @@ def main(argv=None):
     p.add_argument("--scene-kind",choices=["point","plane"],default="point")
     p.add_argument("--ablation-windows",type=int,nargs="+",help="Matched joint BA window ablation; replaces normal seven arms")
     p.add_argument("--extended-ablation",action="store_true",help="Also run ground-off and rotation attenuation controls")
+    p.add_argument("--ij",action="store_true",help="Run I observability and J virtual moment experiments instead of H")
+    p.add_argument("--ij-mode",choices=["both","I","J"],default="both")
+    p.add_argument("--shuffle-repeats",type=int,default=3)
+    p.add_argument("--information-maxiter",type=int,default=10000)
     p.add_argument("--rotation-multiplier",type=float,default=.5,help="Rotation attenuation in extended controls only")
     p.add_argument("--visual-max-nfev",type=int,default=300,help="H0 budget in ablation mode")
     p.add_argument("--reference-ba",type=Path,help="Validate selected visual support and original state against prior Hfixed_HE NPZs")
@@ -141,7 +146,9 @@ def main(argv=None):
     if (args.window<1 or args.window%2==0 or args.max_tracks_per_view<12 or args.ground_cap<6
             or not 0<args.min_parallax_deg<90 or args.seed<0 or args.max_nfev<10):
         raise ValueError("Invalid BA sampling/iteration settings")
-    windows=sorted(set(args.ablation_windows or [args.window]))
+    windows=sorted(set([1,5] if args.ij else (args.ablation_windows or [args.window])))
+    if args.ij and (args.window!=5 or args.scene_kind!="point" or args.ablation_windows or args.extended_ablation or args.ground_weight<=0 or args.shuffle_repeats<1 or args.information_maxiter<1):
+        raise ValueError("IJ requires W1/W5 point factors, --window 5, positive ground weight; no H ablation flags")
     if (any(w<1 or w%2==0 for w in windows) or args.window not in windows
             or args.visual_max_nfev<10 or not 0<args.rotation_multiplier<=1
             or (args.extended_ablation and not args.ablation_windows)
@@ -297,9 +304,9 @@ def main(argv=None):
     b4=ground_doc["experiments"].get("B4c_w0.1")
     if b4 and b4.get("success"): summary["B4c_reference"]=b4
     opts={k:getattr(args,k) for k in ("visual_weight","motion_weight","ground_weight","sigma_px","sigma_scene","sigma_ground","max_nfev","pose_rotation_deg","pose_translation_m","max_log_scale")}
-    def fit(name,kind,fixed=None,window=None,**overrides):
+    def fit(name,kind,fixed=None,window=None,custom_support=None,**overrides):
         w=args.window if window is None else window
-        support=by_window[w]
+        support=by_window[w] if custom_support is None else custom_support
         settings={**opts,**overrides}
         LOG.info("Optimizing %s",name);start=perf_counter()
         result,local=solve_local_ba(support,X,scales,he,kind=kind,fixed_local=fixed,**settings)
@@ -331,7 +338,36 @@ def main(argv=None):
         LOG.info("%s: success=%s, nfev=%d, %.1fs",name,result["success"],result["nfev"],result["elapsed_s"])
         return local
     zeros=[np.zeros(s.size) for s in segments]
-    if args.ablation_windows:
+    if args.ij:
+        if args.ij_mode in ("both","I"):
+            info=dict(information=True,information_maxiter=args.information_maxiter)
+            fit("I1_HE_noground","he",ground_weight=0.,**info)
+            fit("I2_HE_ground","he",**info)
+            fit("I3_scene_noground","scene",ground_weight=0.,**info)
+            fit("I4_scene_ground","scene",**info)
+        if args.ij_mode in ("both","J"):
+            controls,meta=virtual_moments([s.factors for s in by_window[5]],args.seed,args.shuffle_repeats)
+            summary["virtual_moments"]=meta
+            fit("J0_HE_block","he",he_block_robust=True)
+            fit("J1_real_w1","scene",window=1)
+            if args.ij_mode=="both":
+                # Identical objective/state/settings; alias the saved I4 result,
+                # do not run again or count it as independent evidence.
+                import shutil
+                shutil.copytree(args.out/"I4_scene_ground",args.out/"J2_real_w5")
+                summary["experiments"]["J2_real_w5"]={**summary["experiments"]["I4_scene_ground"],"alias_of":"I4_scene_ground"}
+                write_json(args.out/"summary.json",summary)
+            else: fit("J2_real_w5","scene",window=5)
+            for name,fs in controls.items():
+                fit(name,"scene",custom_support=[replace(s,factors=f) for s,f in zip(segments,fs)])
+            # Small-angle equivalent to HE block whitening: translation sigma
+            # sigma_t, isotropic alpha=(sigma_t/sigma_R)^2/2, zero centroid.
+            # Finite rotations use chordal rather than log residual.
+            alpha=(he.sigma_relative_translation_m/np.deg2rad(he.sigma_relative_rotation_deg))**2/2
+            fs=[moment_factors(np.zeros((len(s.centers),3)),np.broadcast_to(np.eye(3)*alpha,(len(s.centers),3,3))) for s in segments]
+            summary["virtual_moments"]["HE_matched_isotropic_alpha_m2"]=float(alpha)
+            fit("J0b_HE_matched_chordal","scene",custom_support=[replace(s,factors=f) for s,f in zip(segments,fs)],sigma_scene=he.sigma_relative_translation_m)
+    elif args.ablation_windows:
         fit("Hfixed_HE","he",zeros)
         for w in windows: fit(f"Hfixed_scene_w{w}","scene",zeros,window=w)
         local=fit("H0_visual","visual",max_nfev=args.visual_max_nfev)
