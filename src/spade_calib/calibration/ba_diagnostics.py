@@ -156,3 +156,47 @@ def virtual_moments(factors,seed=17,shuffle_repeats=3):
                     mean_second_moment_trace=float(np.mean([np.mean(np.trace(c,axis1=1,axis2=2)+np.sum(m*m,axis=1)) for m,c in data])))
     return out,dict(reference=stats(factors),controls={k:stats(v) for k,v in out.items()},
                     permutations=permutations,seed=seed,weighting="equal segment / equal center")
+
+
+def scale_coupling_information(J, n_scales, phi=None, *, maxiter=10000,
+                               rtol=1e-8, atol=1e-10):
+    """Same-state nested nuisance projection: eta vs [eta, log-scale].
+
+    Columns [X(6), log-scales, local BA]. Units identical to I experiment.
+    The PSD difference is information lost by freeing scale, not bias or
+    a statistical covariance. Use a common threshold for both spectra.
+    """
+    J=sparse.csr_matrix(J,dtype=float)
+    if not 1<=n_scales<=J.shape[1]-6:
+        raise ValueError("Invalid scale column count")
+    fixed=np.zeros(J.shape[1]-6,bool);fixed[:n_scales]=True
+    kw=dict(maxiter=maxiter,rtol=rtol,atol=atol)
+    f=marginal_information(J,phi,fixed_nuisance=fixed,**kw)
+    u=marginal_information(J,phi,**kw)
+    F=np.asarray(f["information_matrix"]);U=np.asarray(u["information_matrix"])
+    D=F-U;D=(D+D.T)/2
+    ev,V=np.linalg.eigh(F);de=np.linalg.eigvalsh(D)
+    svmax=max(f["singular_values"][0],u["singular_values"][0])
+    floor=max(f["numerical_floor_heuristic"],u["numerical_floor_heuristic"],rtol*svmax)
+    # PSD tolerance is a numerical consistency check, not a certified bound.
+    tol=max(1e-12,1e-7*max(float(ev[-1]),0.),10*floor*svmax)
+    reliable=bool(f["reliable"] and u["reliable"] and de[0]>=-tol)
+    def ratio(a,b):
+        return float(a/b) if b>floor**2 and b>0 else None
+    keep=ev>floor**2
+    fractions=[]
+    if reliable and np.any(keep):
+        Q=V[:,keep]/np.sqrt(ev[keep])
+        fractions=np.linalg.eigvalsh(Q.T@D@Q).tolist()
+    weak=np.asarray(u["weakest_direction_normalized"])
+    return dict(reliable=reliable,scale_columns=int(n_scales),
+                fixed_scale=f,free_scale=u,information_loss_matrix=D.tolist(),
+                loss_eigenvalues=de.tolist(),psd_tolerance=tol,
+                common_sv_floor=float(floor),
+                rank_fixed_common=int(np.count_nonzero(np.asarray(f["singular_values"])>floor)) if reliable else None,
+                rank_free_common=int(np.count_nonzero(np.asarray(u["singular_values"])>floor)) if reliable else None,
+                trace_loss_fraction=ratio(np.trace(D),np.trace(F)) if reliable else None,
+                axis_loss_fraction=[ratio(a,b) for a,b in zip(np.diag(D),np.diag(F))] if reliable else None,
+                free_weak_direction_loss_fraction=ratio(weak@D@weak,weak@F@weak) if reliable else None,
+                generalized_loss_fractions=fractions,
+                warning="Fractions are local directional information losses on the numerically supported subspace; not covariance, error attribution or evidence of scale bias. Bounds ignored; tiny negative fractions may be numerical.")

@@ -13,7 +13,7 @@ from scipy.spatial.transform import Rotation
 from spade_calib.io.colmap_observations import project
 from spade_calib.calibration.scene_consistency import predicted_relative
 from spade_calib.calibration.segmented_ground import _robust
-from spade_calib.calibration.ba_diagnostics import marginal_information
+from spade_calib.calibration.ba_diagnostics import marginal_information,scale_coupling_information
 from spade_calib.calibration.crossmodal_lines import residual as line_residual, metrics as line_metrics
 
 
@@ -108,7 +108,8 @@ def solve_local_ba(segments,X0,scales,he,*,kind="visual",fixed_local=None,
                    max_nfev=80,pose_rotation_deg=5.,pose_translation_m=2.,
                    max_log_scale=.15,rotation_multiplier=1.,he_block_robust=False,
                    information=False,information_maxiter=10000,
-                   line_records=None,line_K=None,line_weight=0.,line_sigma_px=2.):
+                   line_records=None,line_K=None,line_weight=0.,line_sigma_px=2.,
+                   scale_diagnostic_state=None):
     """Common initial state for H0/H1/H2; sparse FD + LSMR, no pose priors.
 
     Per-segment mean visual and motion losses, robustified before weights.
@@ -214,6 +215,28 @@ def solve_local_ba(segments,X0,scales,he,*,kind="visual",fixed_local=None,
         # Five samples per 3D segment, signed pixel distance + depth barrier.
         J[row:,:6]=1;row+=len(line_residual(X0,line_records,line_K,line_sigma_px))
     if row!=J.shape[0]: raise RuntimeError("BA sparsity row mismatch")
+    if scale_diagnostic_state is not None:
+        # Diagnostic only: no optimization and no new data selection.
+        if not joint or not free or use_lines or information:
+            raise ValueError("S1 requires joint free BA without M1 lines or I mode")
+        at=np.asarray(scale_diagnostic_state,float)
+        if at.shape!=(dim,) or not np.isfinite(at).all() or np.any(at<lo-1e-8) or np.any(at>hi+1e-8):
+            raise ValueError("Invalid archived BA parameter vector")
+        import logging
+        log=logging.getLogger(__name__)
+        initial,_=evaluate(x0,True);final,local=evaluate(at,True)
+        info={}
+        for label,state in (("common_initial",x0),("archived_solution",at)):
+            info[label]={}
+            for mode in ("raw","robust"):
+                log.info("S1 %s %s: same-state scale/nuisance projection",label,mode)
+                jac=least_squares(lambda x:evaluate(x,raw=(mode=="raw")),state,
+                                  jac="3-point",jac_sparsity=J.tocsr(),max_nfev=1).jac
+                info[label][mode]=scale_coupling_information(jac,K,state[:3],maxiter=information_maxiter)
+        active=np.flatnonzero(np.isclose(at,lo,rtol=0,atol=1e-6)|np.isclose(at,hi,rtol=0,atol=1e-6))
+        return dict(diagnostic_only=True,initial=initial,final=final,scale_information=info,
+                    active_parameter_indices=active.tolist(),variables=dim,jacobian_nnz=int(J.nnz),
+                    warning="Archived solution; no refit. Raw and transformed robust Jacobians; unconstrained local tangent, not statistical covariance."),local
     sol=least_squares(evaluate,x0,jac_sparsity=J.tocsr(),tr_solver="lsmr",x_scale="jac",
                       bounds=(lo,hi),max_nfev=max_nfev,ftol=1e-7,xtol=1e-7,gtol=1e-7)
     initial,_=evaluate(x0,True);final,local=evaluate(sol.x,True)

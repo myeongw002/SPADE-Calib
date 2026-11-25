@@ -116,6 +116,7 @@ def main(argv=None):
     p.add_argument("--ablation-windows",type=int,nargs="+",help="Matched joint BA window ablation; replaces normal seven arms")
     p.add_argument("--extended-ablation",action="store_true",help="Also run ground-off and rotation attenuation controls")
     p.add_argument("--ij",action="store_true",help="Run I observability and J virtual moment experiments instead of H")
+    p.add_argument("--s1",action="store_true",help="S1: diagnose scale coupling at archived H1/H2 states without refitting")
     p.add_argument("--line-data",type=Path,help="M1 mode: prepared M0 manifest and annotations")
     p.add_argument("--line-weights",type=float,nargs="+",default=[.01,.1,1.])
     p.add_argument("--line-sigma-px",type=float,default=2.)
@@ -152,6 +153,10 @@ def main(argv=None):
     if (args.window<1 or args.window%2==0 or args.max_tracks_per_view<12 or args.ground_cap<6
             or not 0<args.min_parallax_deg<90 or args.seed<0 or args.max_nfev<10):
         raise ValueError("Invalid BA sampling/iteration settings")
+    if args.s1 and (not args.reference_ba or args.ij or args.line_data or args.ablation_windows
+                     or args.extended_ablation or args.image_dir or args.window!=5 or args.scene_kind!="point"
+                     or args.ground_weight<=0 or args.information_maxiter<1):
+        raise ValueError("S1 requires original --reference-ba H, W5 point, positive ground; no other modes")
     if args.line_data:
         if args.ij or args.ablation_windows or args.extended_ablation or args.image_dir or not args.reference_ba or args.window!=5 or args.scene_kind!="point":
             raise ValueError("M1 requires --reference-ba, W5 point factors; no H/IJ/projection flags")
@@ -400,6 +405,59 @@ def main(argv=None):
         LOG.info("%s: success=%s, nfev=%d, %.1fs",name,result["success"],result["nfev"],result["elapsed_s"])
         return local
     zeros=[np.zeros(s.size) for s in segments]
+    if args.s1:
+        ref=args.reference_ba
+        prior=json.loads((ref/"summary.json").read_text())
+        if (not np.allclose(prior["baseline"]["T_camera_lidar"],X,atol=1e-9)
+                or not np.allclose(prior["baseline"]["scales"],scales,rtol=1e-10)
+                or Path(prior["settings"]["run"]).name!=args.run.name
+                or prior["settings"]["window"]!=5 or prior["settings"]["scene_kind"]!="point"):
+            raise ValueError("S1 reference baseline/config mismatch")
+        for key in opts:
+            if key!="max_nfev" and not np.isclose(prior["settings"][key],opts[key]):
+                raise ValueError(f"S1 reference setting mismatch: {key}")
+        # Original H archive (or H ablation W5 with same settings).
+        arms=[("H1_joint_HE","he"),("H2_joint_scene" if "H2_joint_scene" in prior["experiments"] else "H2_joint_scene_w5","scene")]
+        for name,kind in arms:
+            r=prior["experiments"][name]
+            if not r["success"] or r.get("he_block_robust",False) or r.get("rotation_multiplier",1.)!=1.:
+                raise ValueError(f"S1 needs successful unattenuated original H arm: {name}")
+            for key,val in r.get("fit_settings",{}).items():
+                if key in opts and key!="max_nfev" and not np.isclose(val,opts[key]):
+                    raise ValueError(f"S1 arm setting mismatch: {name}, {key}")
+            if r.get("window",5)!=5 or r.get("ground_weight",opts["ground_weight"])!=opts["ground_weight"]:
+                raise ValueError("S1 arm window/ground mismatch")
+            Y=validate_extrinsic(np.asarray(r["final"]["T_camera_lidar"],float))
+            est=np.asarray(r["final"]["scales"],float)
+            x=[Rotation.from_matrix(Y[:3,:3]@X[:3,:3].T).as_rotvec(),Y[:3,3]-X[:3,3],np.log(est/scales)]
+            for k,s in enumerate(segments):
+                with np.load(ref/name/f"segment_{k:02d}.npz",allow_pickle=False) as z:
+                    for key,value in (("frames",s.frames),("point_ids",s.point_ids),
+                                      ("obs_camera_index",s.obs_cam),("obs_landmark_index",s.obs_pt),("obs_uv",s.uv)):
+                        if not np.array_equal(z[key],value):
+                            raise ValueError(f"S1 archived support mismatch: {name}, {k}, {key}")
+                    local=np.asarray(z["local_parameters"],float)
+                    if local.shape!=(s.size,) or not np.isfinite(local).all(): raise ValueError("Invalid archived local state")
+                    R,t,P=s.state(local)
+                    for key,value in (("camera_R_anchor",R),("camera_t_anchor_ref_metric",t),
+                                      ("landmark_xyz_ref_metric",P),("scale_ref",scales[k]),("scale_est",est[k])):
+                        if not np.allclose(z[key],value,rtol=1e-9,atol=1e-8):
+                            raise ValueError(f"S1 archived state mismatch: {name}, {k}, {key}")
+                    x.append(local)
+            result,_=solve_local_ba(segments,X,scales,he,kind=kind,**opts,
+                      scale_diagnostic_state=np.concatenate(x),information_maxiter=args.information_maxiter)
+            # Exact objective reproduction gate: do not interpret information
+            # if the current code/support differs from archived H.
+            for state in ("initial","final"):
+                if not np.isclose(result[state]["cost"],r[state]["cost"],rtol=1e-7,atol=1e-9):
+                    raise ValueError(f"S1 objective mismatch: {name}, {state}")
+            result["reference_arm"]=name
+            result["reference_cost_verified"]=True
+            result["source_active_bounds_reported"]=bool(r.get("bound_hit"))
+            if gt is not None: result["gt_evaluation"]=evaluate_camera_lidar(Y,gt)
+            summary["experiments"][name]=result
+            write_json(args.out/"summary.json",summary)
+        return 0
     if args.line_data:
         # Sequential H2 baseline (the exact M0 initializer), not a refit.
         for name,Y,result in (
