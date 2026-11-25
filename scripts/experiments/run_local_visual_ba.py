@@ -17,6 +17,7 @@ from run_scene_consistency import load_ground
 from run_segment_ground import read_xyz_ply,write_json
 from spade_calib.calibration.local_visual_ba import LocalBA,solve_local_ba
 from spade_calib.calibration.ba_diagnostics import virtual_moments,moment_factors
+from spade_calib.calibration.crossmodal_lines import fit_lines,metrics as line_metrics,image_line,sample_line,project_line
 from spade_calib.io.colmap import resolve_colmap_images,load_registered_images
 from spade_calib.io.colmap_observations import load_cameras,load_observations,camera_parameters,project,unique_view_observations
 from spade_calib.io.kitti import load_kitti_trajectory_data,frame_id_from_name
@@ -115,6 +116,11 @@ def main(argv=None):
     p.add_argument("--ablation-windows",type=int,nargs="+",help="Matched joint BA window ablation; replaces normal seven arms")
     p.add_argument("--extended-ablation",action="store_true",help="Also run ground-off and rotation attenuation controls")
     p.add_argument("--ij",action="store_true",help="Run I observability and J virtual moment experiments instead of H")
+    p.add_argument("--line-data",type=Path,help="M1 mode: prepared M0 manifest and annotations")
+    p.add_argument("--line-weights",type=float,nargs="+",default=[.01,.1,1.])
+    p.add_argument("--line-sigma-px",type=float,default=2.)
+    p.add_argument("--line-holdout-frame",type=int,help="Optional exploratory frame leave-one-out; never use held-out line in fit")
+    p.add_argument("--line-initial-summary",type=Path,help="Prior H summary for M1a/b (default --reference-ba/summary.json)")
     p.add_argument("--ij-mode",choices=["both","I","J"],default="both")
     p.add_argument("--shuffle-repeats",type=int,default=3)
     p.add_argument("--information-maxiter",type=int,default=10000)
@@ -146,6 +152,15 @@ def main(argv=None):
     if (args.window<1 or args.window%2==0 or args.max_tracks_per_view<12 or args.ground_cap<6
             or not 0<args.min_parallax_deg<90 or args.seed<0 or args.max_nfev<10):
         raise ValueError("Invalid BA sampling/iteration settings")
+    if args.line_data:
+        if args.ij or args.ablation_windows or args.extended_ablation or args.image_dir or not args.reference_ba or args.window!=5 or args.scene_kind!="point":
+            raise ValueError("M1 requires --reference-ba, W5 point factors; no H/IJ/projection flags")
+        if (not np.isfinite(args.line_weights).all() or min(args.line_weights)<=0
+                or len(set(args.line_weights))!=len(args.line_weights)
+                or not np.isfinite(args.line_sigma_px) or args.line_sigma_px<=0 or args.ground_weight<=0):
+            raise ValueError("Invalid M1 settings")
+    elif args.line_holdout_frame is not None or args.line_initial_summary:
+        raise ValueError("Line holdout/initializer options require --line-data")
     windows=sorted(set([1,5] if args.ij else (args.ablation_windows or [args.window])))
     if args.ij and (args.window!=5 or args.scene_kind!="point" or args.ablation_windows or args.extended_ablation or args.ground_weight<=0 or args.shuffle_repeats<1 or args.information_maxiter<1):
         raise ValueError("IJ requires W1/W5 point factors, --window 5, positive ground weight; no H ablation flags")
@@ -304,16 +319,63 @@ def main(argv=None):
     b4=ground_doc["experiments"].get("B4c_w0.1")
     if b4 and b4.get("success"): summary["B4c_reference"]=b4
     opts={k:getattr(args,k) for k in ("visual_weight","motion_weight","ground_weight","sigma_px","sigma_scene","sigma_ground","max_nfev","pose_rotation_deg","pose_translation_m","max_log_scale")}
+    line_train=[];line_test=[];line_K=None;line_X=None
+    if args.line_data:
+        mp=args.line_data/"manifest.json";ap=args.line_data/"annotations.json"
+        md=json.loads(mp.read_text());ad=json.loads(ap.read_text())
+        if ad["manifest_sha256"]!=hashlib.sha256(mp.read_bytes()).hexdigest():
+            raise ValueError("Annotation manifest mismatch")
+        if Path(md["run"]).name!=args.run.name or md["camera_index"]!=int(cfg["camera_index"]):
+            raise ValueError("M0/M1 sequence or camera mismatch")
+        line_K=np.asarray(md["K"],float);line_X=validate_extrinsic(np.asarray(md["T_camera_lidar"],float))
+        prior=json.loads((args.line_initial_summary or (args.reference_ba/"summary.json")).read_text())
+        if not np.allclose(prior["baseline"]["T_camera_lidar"],X,atol=1e-9):
+            raise ValueError("H baseline mismatch")
+        arm=prior["experiments"][md["initial_arm"]]
+        if not arm["success"] or not np.allclose(line_X,arm["final"]["T_camera_lidar"],atol=1e-9):
+            raise ValueError("M0 initialization is not the specified successful H arm")
+        from spade_calib.evaluation.kitti import parse_kitti_odom_calib
+        kp=parse_kitti_odom_calib(Path(args.sequence or cfg["sequence"])/"calib.txt",require_tr=False)[f"P{int(cfg['camera_index'])}"][:,:3]
+        if not np.allclose(line_K,kp,rtol=1e-8,atol=1e-8): raise ValueError("M0 rectified K mismatch")
+        frames={r["frame"]:r for r in md["frames"]};seen=set();splits={};features={}
+        for r in ad["records"]:
+            if r["id"] in seen or r["frame"] not in frames or not r["manual_identity_confirmed"] or r["split"] not in ("train","test"):
+                raise ValueError("Invalid M0 manual record")
+            seen.add(r["id"])
+            for store,key in ((splits,r["frame"]),(features,r["feature"])):
+                if key in store and store[key]!=r["split"]: raise ValueError("Original annotation train/test leakage")
+                store[key]=r["split"]
+            sample_line(r["xyz_lidar"]);image_line(r["uv_image"])
+            uv=np.asarray(r["uv_image"]);hh,ww=frames[r["frame"]]["image_shape"]
+            if np.any(uv<0) or np.any(uv>=np.array([ww,hh])):
+                raise ValueError("Image annotation outside original image")
+            if r["split"]=="test" or r["frame"]==args.line_holdout_frame: line_test.append(r)
+            else: line_train.append(r)
+        if args.line_holdout_frame is not None and args.line_holdout_frame not in {r["frame"] for r in line_test}:
+            raise ValueError("Requested holdout frame has no annotation")
+        if len(line_train)<2 or len({r["frame"] for r in line_train})<2:
+            raise ValueError("M1 requires at least two line records from two frames")
+        if line_metrics(line_X,line_train,line_K)["nonpositive_or_near_samples"]:
+            raise ValueError("Invalid line depth at H2 initializer")
+        summary["line_data"]=dict(manifest_sha256=ad["manifest_sha256"],annotations_sha256=hashlib.sha256(ap.read_bytes()).hexdigest(),
+            train_ids=[r["id"] for r in line_train],test_ids=[r["id"] for r in line_test],
+            feature_overlap=sorted(set(r["feature"] for r in line_train)&set(r["feature"] for r in line_test)),
+            warning="Exploratory frame holdout may share a physical feature; weights not selected by GT/test. Synchronous target LiDAR coordinates, fixed GLIM, line residual depends only on X.")
+        if gt is not None: summary["line_data"]["GT_diagnostic"]=dict(train=line_metrics(gt,line_train,line_K),test=line_metrics(gt,line_test,line_K))
     def fit(name,kind,fixed=None,window=None,custom_support=None,**overrides):
         w=args.window if window is None else window
         support=by_window[w] if custom_support is None else custom_support
         settings={**opts,**overrides}
         LOG.info("Optimizing %s",name);start=perf_counter()
-        result,local=solve_local_ba(support,X,scales,he,kind=kind,fixed_local=fixed,**settings)
+        result,local=solve_local_ba(support,X,scales,he,kind=kind,fixed_local=fixed,
+            line_records=line_train or None,line_K=line_K,**settings)
         result["window"]=w;result["fit_settings"]=settings
         states=[s.state(x) for s,x in zip(support,local)]
         ratio=np.asarray(result["final"]["scales"])/scales
         Y=np.array(result["final"]["T_camera_lidar"])
+        if args.line_data:
+            result["line_train"]=line_metrics(Y,line_train,line_K)
+            result["line_test"]=line_metrics(Y,line_test,line_K)
         if gt_world is not None:
             result["trajectory_gt"]=trajectory_metrics(states,ratio)
         # Evaluate unattenuated physical scene RMS on BOTH frozen geometries.
@@ -338,7 +400,27 @@ def main(argv=None):
         LOG.info("%s: success=%s, nfev=%d, %.1fs",name,result["success"],result["nfev"],result["elapsed_s"])
         return local
     zeros=[np.zeros(s.size) for s in segments]
-    if args.ij:
+    if args.line_data:
+        # Sequential H2 baseline (the exact M0 initializer), not a refit.
+        for name,Y,result in (
+                ("M1a_H2_reference",line_X,{"success":True,"reference_only":True}),
+                ("M1b_H2_xz",*fit_lines(line_train,line_X,line_K,mode="xz",sigma_px=args.line_sigma_px))):
+            result["final"]={"T_camera_lidar":Y.tolist(),"scales":arm["final"]["scales"]}
+            result["line_train"]=line_metrics(Y,line_train,line_K)
+            result["line_test"]=line_metrics(Y,line_test,line_K)
+            if gt is not None: result["gt_evaluation"]=evaluate_camera_lidar(Y,gt)
+            summary["experiments"][name]=result
+        write_json(args.out/"summary.json",summary)
+        # Matched baselines for both fixed and free visual states.
+        fit("M1c_fixed_HE_w0","he",zeros)
+        fit("M1d_joint_HE_w0","he")
+        fit("M1d_joint_scene_w0","scene")
+        for w in args.line_weights:
+            lw=dict(line_weight=w,line_sigma_px=args.line_sigma_px)
+            fit(f"M1c_fixed_HE_w{w:g}","he",zeros,**lw)
+            fit(f"M1d_joint_HE_w{w:g}","he",**lw)
+            fit(f"M1d_joint_scene_w{w:g}","scene",**lw)
+    elif args.ij:
         if args.ij_mode in ("both","I"):
             info=dict(information=True,information_maxiter=args.information_maxiter)
             fit("I1_HE_noground","he",ground_weight=0.,**info)

@@ -140,3 +140,25 @@ def test_information_with_ground_on_and_off():
             entry=r["information"]["solution"][mode]
             assert len(entry["all_nuisance_free"]["singular_values"])==6
             assert ("remove_ground_same_state" in entry)==(weight>0)
+
+
+def test_joint_line_residual_and_sparse_rows():
+    from spade_calib.calibration.crossmodal_lines import project_line
+    seg,X=synthetic()
+    K=np.array([[500.,0,300],[0,500,200],[0,0,1]])
+    records=[]
+    for i,(x,z) in enumerate([(-2.,8.),(1.,6.),(3.,12.)]):
+        p=np.array([[x,-1.,z],[x,1.,z]])
+        uv,_=project_line(p,X,K)
+        records.append(dict(id=str(i),frame=i,xyz_lidar=p,uv_image=uv))
+    for fixed in (None,[np.zeros(seg.size)]):
+        for kind in ("he","scene"):
+            r,_=solve_local_ba([seg],X,[1.],HandEyeSettings(),kind=kind,
+                fixed_local=fixed,line_records=records,line_K=K,line_weight=.1,max_nfev=20)
+            assert r["success"] and r["final"]["cost"]<1e-15
+            assert r["final"]["line_metrics"]["rmse_px"]<1e-10
+    # Nonzero line term actually influences the solve, rather than only reporting it.
+    perturbed=X.copy();perturbed[0,3]=.15
+    r,_=solve_local_ba([seg],perturbed,[1.],HandEyeSettings(),kind="he",
+        fixed_local=[np.zeros(seg.size)],line_records=records,line_K=K,line_weight=.1,max_nfev=100)
+    assert r["final"]["line_metrics"]["rmse_px"]<r["initial"]["line_metrics"]["rmse_px"]

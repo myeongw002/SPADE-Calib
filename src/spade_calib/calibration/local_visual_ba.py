@@ -14,6 +14,7 @@ from spade_calib.io.colmap_observations import project
 from spade_calib.calibration.scene_consistency import predicted_relative
 from spade_calib.calibration.segmented_ground import _robust
 from spade_calib.calibration.ba_diagnostics import marginal_information
+from spade_calib.calibration.crossmodal_lines import residual as line_residual, metrics as line_metrics
 
 
 @dataclass
@@ -106,7 +107,8 @@ def solve_local_ba(segments,X0,scales,he,*,kind="visual",fixed_local=None,
                    sigma_px=1.,sigma_scene=.15,sigma_ground=.15,
                    max_nfev=80,pose_rotation_deg=5.,pose_translation_m=2.,
                    max_log_scale=.15,rotation_multiplier=1.,he_block_robust=False,
-                   information=False,information_maxiter=10000):
+                   information=False,information_maxiter=10000,
+                   line_records=None,line_K=None,line_weight=0.,line_sigma_px=2.):
     """Common initial state for H0/H1/H2; sparse FD + LSMR, no pose priors.
 
     Per-segment mean visual and motion losses, robustified before weights.
@@ -121,6 +123,19 @@ def solve_local_ba(segments,X0,scales,he,*,kind="visual",fixed_local=None,
         raise ValueError("Invalid BA settings")
     if not np.isfinite(rotation_multiplier) or rotation_multiplier<=0:
         raise ValueError("Invalid rotation multiplier")
+    if not np.isfinite([line_weight,line_sigma_px]).all() or line_weight<0 or line_sigma_px<=0:
+        raise ValueError("Invalid line settings")
+    use_lines=line_weight>0
+    if use_lines:
+        if not joint or not line_records or line_K is None:
+            raise ValueError("Positive line weight requires motion BA and actual line records/intrinsics")
+        line_K=np.asarray(line_K,float)
+        if (line_K.shape!=(3,3) or not np.isfinite(line_K).all()
+                or min(line_K[0,0],line_K[1,1])<=0 or not np.allclose(line_K[2],[0,0,1])):
+            raise ValueError("Invalid rectified line intrinsics")
+        initial_line=line_metrics(X0,line_records,line_K)
+        if initial_line["nonpositive_or_near_samples"]:
+            raise ValueError("Line support behind/too near camera at initial state")
     base=6+K if joint else 0
     offsets=np.r_[base,base+np.cumsum([s.size if free else 0 for s in segments])]
     dim=int(offsets[-1]);lo=np.full(dim,-np.inf);hi=np.full(dim,np.inf)
@@ -169,9 +184,16 @@ def solve_local_ba(segments,X0,scales,he,*,kind="visual",fixed_local=None,
                     ground_offset_m=s.ground(P,X,ratio[k]),
                     he_normalized_rms=float(np.sqrt(np.mean(np.sum(s.motion(R,t,X,ratio[k],"he",he)**2,axis=1)))),
                     scene_rms_m=float(np.sqrt(np.mean(np.sum(s.motion(R,t,X,ratio[k],"scene",he)**2,axis=1))))))
+        # Each line is in its synchronous LiDAR frame: X alone projects it
+        # into the actual image. No local BA pose/scale dependence.
+        if use_lines:
+            lr=line_residual(X,line_records,line_K,line_sigma_px).reshape(-1,2)
+            if not raw: lr[:,0]=_robust(lr[:,0],"soft_l1")
+            pieces.append(lr.ravel()*np.sqrt(line_weight/len(lr)))
         r=np.concatenate(pieces)
         return (dict(T_camera_lidar=X.tolist(),scales=(np.asarray(scales)*ratio).tolist(),
-                     segments=rows,cost=float(.5*(r@r))),local) if report else r
+                     segments=rows,cost=float(.5*(r@r)),
+                     line_metrics=line_metrics(X,line_records,line_K) if use_lines else None),local) if report else r
     # Exact structural Jacobian sparsity including the ground centroid.
     x0=np.zeros(dim);J=lil_matrix((len(evaluate(x0)),dim),dtype=np.int8);row=0;ground_rows=[]
     for k,s in enumerate(segments):
@@ -188,12 +210,16 @@ def solve_local_ba(segments,X0,scales,he,*,kind="visual",fixed_local=None,
             if ground_weight>0:
                 cols=np.r_[glob,s.pt_cols[s.ground_ids].ravel()+off] if free else glob
                 J[row,cols]=1;ground_rows.append(row);row+=1
+    if use_lines:
+        # Five samples per 3D segment, signed pixel distance + depth barrier.
+        J[row:,:6]=1;row+=len(line_residual(X0,line_records,line_K,line_sigma_px))
     if row!=J.shape[0]: raise RuntimeError("BA sparsity row mismatch")
     sol=least_squares(evaluate,x0,jac_sparsity=J.tocsr(),tr_solver="lsmr",x_scale="jac",
                       bounds=(lo,hi),max_nfev=max_nfev,ftol=1e-7,xtol=1e-7,gtol=1e-7)
     initial,_=evaluate(x0,True);final,local=evaluate(sol.x,True)
     # No false covariance or global rank claims from a sparse local solver.
-    ok=bool(sol.success and all(r["nonpositive_depth"]==0 for r in final["segments"]))
+    ok=bool(sol.success and all(r["nonpositive_depth"]==0 for r in final["segments"])
+            and (not use_lines or final["line_metrics"]["nonpositive_or_near_samples"]==0))
     active=[]
     for k,s in enumerate(segments):
         if free:
@@ -232,7 +258,7 @@ def solve_local_ba(segments,X0,scales,he,*,kind="visual",fixed_local=None,
                 information=info,
                 active_pose_bounds=active,active_global_bounds=global_active,
                 rotation_multiplier=float(rotation_multiplier),he_block_robust=bool(he_block_robust),
-                ground_weight=float(ground_weight),
+                ground_weight=float(ground_weight),line_weight=float(line_weight),line_sigma_px=float(line_sigma_px),
                 message=str(sol.message),nfev=int(sol.nfev),optimality=float(sol.optimality),
                 bound_hit=bool(np.any(sol.active_mask)),variables=dim,jacobian_nnz=int(J.nnz),
                 initial=initial,final=final),local

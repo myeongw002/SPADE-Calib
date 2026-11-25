@@ -149,7 +149,7 @@ def fit_lines(records,X0,K,*,mode="full",sigma_px=2.,max_rotation_deg=5.,
               max_translation_m=1.,max_nfev=200,start=None):
     if len(records)<1 or sigma_px<=0 or max_rotation_deg<=0 or max_translation_m<=0:
         raise ValueError("Invalid line fit configuration")
-    cols={"x_only":[3],"translation":[3,4,5],"full":list(range(6))}[mode]
+    cols={"x_only":[3],"xz":[3,5],"translation":[3,4,5],"full":list(range(6))}[mode]
     limits=np.r_[np.full(3,np.deg2rad(max_rotation_deg)),np.full(3,max_translation_m)]
     def expand(x):
         v=np.zeros(6);v[cols]=x;return v
