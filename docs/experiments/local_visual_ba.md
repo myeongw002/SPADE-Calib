@@ -87,3 +87,25 @@ instead of overwriting incomplete factors or BA outputs, and runs 07, 09,
 10 sequentially even if one fails. Nonzero final exit status indicates
 at least one failed sequence. Override KITTI, CENTER_STRIDE or VOXEL with
 environment variables. Output locations and failures are printed in logs.
+
+
+## H ablation: matched window, ground and rotation controls
+
+Use --ablation-windows 1 5 --window 5 to build the visual graph once and
+strictly validate matching factor frame IDs and original poses across windows.
+Use --reference-ba to verify original visual support against earlier H NPZ.
+All arms initialize identically except the explicit H0_then controls.
+H0 gets a separate 300-evaluation budget; joint arms keep 80 by default.
+--extended-ablation adds zero ground weight (identical visual graph),
+HE block Soft-L1 (rather than componentwise robustification), and a
+rotation multiplier of 0.5 on HE rotation residual or the rotational
+difference columns of D for scene. Scene attenuation is a diagnostic
+change to the geometry-weighted loss, not an estimated covariance or
+the same whitening as HE. Record raw cross-window scene RMS and active
+bounds. Ground-off still retains ground tracks in the visual graph.
+Optional --gt-poses is evaluation only: camera2 relative 10-frame
+translation, rotation, length MAE, negative-Y-turn signed length bias
+and anchor-relative position RMS, with no fitted GT alignment.
+GLIM remains fixed. Joint LiDAR pose refinement would need an independent
+LiDAR registration/odometry likelihood; do not free the reference
+trajectory using only the existing scene identity residual.

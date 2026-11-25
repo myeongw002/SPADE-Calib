@@ -5,6 +5,9 @@ import argparse
 import json
 import logging
 from pathlib import Path
+from dataclasses import replace
+import hashlib
+from scipy.spatial.transform import Rotation
 from time import perf_counter
 
 import numpy as np
@@ -108,6 +111,12 @@ def main(argv=None):
     p.add_argument("--out",type=Path,required=True)
     p.add_argument("--window",type=int,default=5)
     p.add_argument("--scene-kind",choices=["point","plane"],default="point")
+    p.add_argument("--ablation-windows",type=int,nargs="+",help="Matched joint BA window ablation; replaces normal seven arms")
+    p.add_argument("--extended-ablation",action="store_true",help="Also run ground-off and rotation attenuation controls")
+    p.add_argument("--rotation-multiplier",type=float,default=.5,help="Rotation attenuation in extended controls only")
+    p.add_argument("--visual-max-nfev",type=int,default=300,help="H0 budget in ablation mode")
+    p.add_argument("--reference-ba",type=Path,help="Validate selected visual support and original state against prior Hfixed_HE NPZs")
+    p.add_argument("--gt-poses",type=Path,help="Optional KITTI camera0 GT poses, evaluation only")
     p.add_argument("--max-tracks-per-view",type=int,default=40)
     p.add_argument("--ground-cap",type=int,default=12)
     p.add_argument("--min-parallax-deg",type=float,default=1.)
@@ -132,6 +141,12 @@ def main(argv=None):
     if (args.window<1 or args.window%2==0 or args.max_tracks_per_view<12 or args.ground_cap<6
             or not 0<args.min_parallax_deg<90 or args.seed<0 or args.max_nfev<10):
         raise ValueError("Invalid BA sampling/iteration settings")
+    windows=sorted(set(args.ablation_windows or [args.window]))
+    if (any(w<1 or w%2==0 for w in windows) or args.window not in windows
+            or args.visual_max_nfev<10 or not 0<args.rotation_multiplier<=1
+            or (args.extended_ablation and not args.ablation_windows)
+            or (args.gt_poses and not args.gt_calib)):
+        raise ValueError("Invalid ablation settings")
     if args.out.exists() and any(args.out.iterdir()): raise FileExistsError("Use fresh output")
     cfg=json.loads((args.run/"config.json").read_text())
     saved=json.loads((args.run/"segmented_handeye.json").read_text())["fit"]
@@ -161,7 +176,7 @@ def main(argv=None):
     cams=load_cameras(images.parent/("cameras"+images.suffix))
     records=load_registered_images(images)
     frame_ids=np.array([frame_id_from_name(n) for n in samples.image_names])
-    selected=[];anchors={};entries={e["segment_id"]:e for e in archive["segments"]}
+    selected=[];anchors={};alternate={w:[] for w in windows};entries={e["segment_id"]:e for e in archive["segments"]}
     for k,r in enumerate(rows):
         a,b=int(r["start_index"]),int(r["stop_index_exclusive"])
         ai=(a+b-1)//2;anchor=int(frame_ids[ai])
@@ -171,6 +186,15 @@ def main(argv=None):
         with np.load(args.scene_factors/f"factors_w{args.window}"/f"segment_{k:02d}.npz",allow_pickle=False) as z:
             d={name:z[name] for name in z.files}
         fi=d["frames"];ci=np.searchsorted(frame_ids,fi)
+        for w in windows:
+            with np.load(args.scene_factors/f"factors_w{w}"/f"segment_{k:02d}.npz",allow_pickle=False) as z:
+                for key in ("frames","Ra","ta","Rb","tb"):
+                    if not np.array_equal(z[key],d[key]):
+                        raise ValueError(f"Window {w}, segment {k}: factor support/pose mismatch: {key}")
+                F=z[args.scene_kind+"_factors"]
+                if F.shape!=(len(fi),12,12) or not np.isfinite(F).all() or np.any(z["point_counts"]<3):
+                    raise ValueError("Invalid moment factor archive")
+                alternate[w].append((F,z["point_counts"]))
         if (np.any(ci<a) or np.any(ci>=b) or not np.array_equal(frame_ids[ci],fi)
                 or ai in ci or len(np.unique(ci))!=len(ci)):
             raise ValueError("Factor frame mismatch")
@@ -199,8 +223,24 @@ def main(argv=None):
                     by_k[k],frame_ids[ii],anchor,R,t,np.stack(intr),o,
                     d[args.scene_kind+"_factors"],Ra,ta,scales[k],
                     args.max_tracks_per_view,args.ground_cap,args.min_parallax_deg,[args.seed,k])
+        if args.reference_ba:
+            with np.load(args.reference_ba/"Hfixed_HE"/f"segment_{k:02d}.npz",allow_pickle=False) as z:
+                for key,value in (("frames",seg.frames),("point_ids",seg.point_ids),
+                                  ("obs_camera_index",seg.obs_cam),("obs_landmark_index",seg.obs_pt),("obs_uv",seg.uv)):
+                    if not np.array_equal(z[key],value):
+                        raise ValueError(f"Prior H support mismatch: segment {k}, {key}")
+                for key,value in (("camera_R_anchor",seg.R),("camera_t_anchor_ref_metric",seg.t),
+                                  ("landmark_xyz_ref_metric",seg.points),("scale_ref",scales[k])):
+                    if not np.allclose(z[key],value,rtol=1e-10,atol=1e-9):
+                        raise ValueError(f"Prior H initial state mismatch: segment {k}, {key}")
+        h=hashlib.sha256()
+        for v in (seg.frames,seg.point_ids,seg.obs_cam,seg.obs_pt,seg.uv,seg.intr,seg.ground_ids):
+            a=np.ascontiguousarray(v)
+            h.update(str(a.shape).encode());h.update(a.dtype.str.encode());h.update(a.tobytes())
+        report["support_sha256"]=h.hexdigest()
         segments.append(seg);supports.append(report)
         LOG.info("Segment %d: %d cameras, %d landmarks, %d observations",k,len(ii),len(seg.points),len(seg.uv))
+    by_window={w:[replace(s,factors=alternate[w][k][0]) for k,s in enumerate(segments)] for w in windows}
     args.out.mkdir(parents=True,exist_ok=True)
     gt=kitti_gt_camera_lidar(args.gt_calib,int(cfg["camera_index"])) if args.gt_calib else None
     summary=dict(settings={k:str(v) if isinstance(v,Path) else v for k,v in vars(args).items()},
@@ -208,13 +248,73 @@ def main(argv=None):
                  scene_support=dict(voxel_m=prep["local_voxel_m"],window=args.window,
                                     kind=args.scene_kind,center_stride=prep["settings"]["center_stride"]),
                  experiments={},warning="Local subsampled BA, fixed intrinsics/GLIM, no held-out visual evaluation. Ground offset updated with fixed-normal landmark displacement; not a full plane re-fit.")
+    summary["window_point_counts"]={str(w):[dict(total=int(c.sum()),mean=float(c.mean())) for _,c in alternate[w]] for w in windows}
+    summary["reference_ba_verified"]=bool(args.reference_ba)
     if gt is not None: summary["baseline"]["gt_evaluation"]=evaluate_camera_lidar(X,gt)
+    gt_world=None
+    if args.gt_poses:
+        from spade_calib.evaluation.kitti import parse_kitti_odom_calib
+        cal=parse_kitti_odom_calib(args.gt_calib)
+        raw=np.loadtxt(args.gt_poses).reshape(-1,3,4)
+        Rgt=Rotation.from_matrix(raw[:,:,:3]).as_matrix()
+        p0,pk=cal["P0"],cal[f"P{int(cfg['camera_index'])}"]
+        baseline=np.linalg.solve(pk[:,:3],pk[:,3])-np.linalg.solve(p0[:,:3],p0[:,3])
+        tgt=raw[:,:,3]-Rgt@baseline
+        gt_world=(Rgt,tgt)
+    def trajectory_metrics(states,ratios):
+        if gt_world is None: return None
+        trans=[];rot=[];length=[];anchor_errors=[];negative=[];counts=[]
+        GR,GT=gt_world
+        for seg,(R,t,P),ratio in zip(segments,states,ratios):
+            f=seg.frames; a=seg.anchor
+            if f.min()<0 or f.max()>=len(GR): raise ValueError("GT frame out of range")
+            Rg=GR[f];tg=GT[f]
+            t=ratio*t
+            gt_anchor=(tg-tg[a])@Rg[a]
+            mask=np.arange(len(f))!=a
+            anchor_errors.extend(np.linalg.norm(t[mask]-gt_anchor[mask],axis=1))
+            lookup={int(v):i for i,v in enumerate(f)}
+            ij=[(i,lookup[int(v)+10]) for i,v in enumerate(f) if int(v)+10 in lookup]
+            counts.append(len(ij))
+            if not ij: continue
+            i,j=np.array(ij).T
+            br=R[i].transpose(0,2,1)@R[j]; gr=Rg[i].transpose(0,2,1)@Rg[j]
+            bt=np.einsum("ni,nij->nj",t[j]-t[i],R[i]);gt=np.einsum("ni,nij->nj",tg[j]-tg[i],Rg[i])
+            trans.extend(np.linalg.norm(bt-gt,axis=1))
+            rot.extend(np.rad2deg(Rotation.from_matrix(gr.transpose(0,2,1)@br).magnitude()))
+            le=np.linalg.norm(bt,axis=1)-np.linalg.norm(gt,axis=1)
+            length.extend(le)
+            neg=np.rad2deg(Rotation.from_matrix(gr).as_rotvec()[:,1])<-2
+            negative.extend(le[neg])
+        rms=lambda v:float(np.sqrt(np.mean(np.square(v)))) if len(v) else None
+        return dict(pair_count=len(trans),pairs_per_segment=counts,lag_frames=10,
+                    translation_rmse_m=rms(trans),rotation_rmse_deg=rms(rot),
+                    motion_length_mae_m=float(np.mean(abs(np.asarray(length)))) if length else None,
+                    negative_yaw_count=len(negative),negative_yaw_length_bias_m=float(np.mean(negative)) if negative else None,
+                    anchor_translation_rmse_m=rms(anchor_errors))
+    if gt_world is not None:
+        summary["baseline"]["trajectory_gt"]=trajectory_metrics([(s.R,s.t,s.points) for s in segments],np.ones(K))
     b4=ground_doc["experiments"].get("B4c_w0.1")
     if b4 and b4.get("success"): summary["B4c_reference"]=b4
     opts={k:getattr(args,k) for k in ("visual_weight","motion_weight","ground_weight","sigma_px","sigma_scene","sigma_ground","max_nfev","pose_rotation_deg","pose_translation_m","max_log_scale")}
-    def fit(name,kind,fixed=None):
+    def fit(name,kind,fixed=None,window=None,**overrides):
+        w=args.window if window is None else window
+        support=by_window[w]
+        settings={**opts,**overrides}
         LOG.info("Optimizing %s",name);start=perf_counter()
-        result,local=solve_local_ba(segments,X,scales,he,kind=kind,fixed_local=fixed,**opts)
+        result,local=solve_local_ba(support,X,scales,he,kind=kind,fixed_local=fixed,**settings)
+        result["window"]=w;result["fit_settings"]=settings
+        states=[s.state(x) for s,x in zip(support,local)]
+        ratio=np.asarray(result["final"]["scales"])/scales
+        Y=np.array(result["final"]["T_camera_lidar"])
+        if gt_world is not None:
+            result["trajectory_gt"]=trajectory_metrics(states,ratio)
+        # Evaluate unattenuated physical scene RMS on BOTH frozen geometries.
+        result["cross_window_scene_rmse_m"]={}
+        for ww,ss in by_window.items():
+            errs=[np.mean(np.sum(s.motion(R,t,Y,ratio[k],"scene",he)**2,axis=1))
+                  for k,(s,(R,t,P)) in enumerate(zip(ss,states))]
+            result["cross_window_scene_rmse_m"][str(ww)]=float(np.sqrt(np.mean(errs)))
         result["elapsed_s"]=perf_counter()-start
         if gt is not None and kind!="visual":
             result["gt_evaluation"]=evaluate_camera_lidar(np.array(result["final"]["T_camera_lidar"]),gt)
@@ -231,15 +331,29 @@ def main(argv=None):
         LOG.info("%s: success=%s, nfev=%d, %.1fs",name,result["success"],result["nfev"],result["elapsed_s"])
         return local
     zeros=[np.zeros(s.size) for s in segments]
-    fit("Hfixed_HE","he",zeros)
-    fit("Hfixed_scene","scene",zeros)
-    local=fit("H0_visual","visual")
-    # H0 result as a diagnostic two-stage pipeline; keep convergence status.
-    fit("H0_then_HE","he",local)
-    fit("H0_then_scene","scene",local)
-    # Both joint arms start at identical archived poses/landmarks, NOT H0.
-    fit("H1_joint_HE","he")
-    fit("H2_joint_scene","scene")
+    if args.ablation_windows:
+        fit("Hfixed_HE","he",zeros)
+        for w in windows: fit(f"Hfixed_scene_w{w}","scene",zeros,window=w)
+        local=fit("H0_visual","visual",max_nfev=args.visual_max_nfev)
+        fit("H0_then_HE","he",local)
+        for w in windows: fit(f"H0_then_scene_w{w}","scene",local,window=w)
+        fit("H1_joint_HE","he")
+        for w in windows: fit(f"H2_joint_scene_w{w}","scene",window=w)
+        if args.extended_ablation:
+            fit("H1_HE_block","he",he_block_robust=True)
+            fit("H1_HE_noground","he",ground_weight=0.)
+            fit("H1_HE_rotlow","he",rotation_multiplier=args.rotation_multiplier)
+            for w in windows:
+                fit(f"H2_scene_w{w}_noground","scene",window=w,ground_weight=0.)
+                fit(f"H2_scene_w{w}_rotlow","scene",window=w,rotation_multiplier=args.rotation_multiplier)
+    else:
+        fit("Hfixed_HE","he",zeros)
+        fit("Hfixed_scene","scene",zeros)
+        local=fit("H0_visual","visual")
+        fit("H0_then_HE","he",local)
+        fit("H0_then_scene","scene",local)
+        fit("H1_joint_HE","he")
+        fit("H2_joint_scene","scene")
     if args.image_dir:
         from spade_calib.evaluation.segment_projection import export_projections
         from spade_calib.evaluation.kitti import parse_kitti_odom_calib

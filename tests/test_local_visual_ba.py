@@ -71,3 +71,21 @@ def test_duplicate_landmark_observations_keep_lowest_error_and_measured_pixel(tm
     np.testing.assert_array_equal(pixels,[[22.,41.],[30.,50.]])
     p,pixels,removed=unique_view_observations(np.array([],int),np.empty((0,2)),np.empty(0))
     assert removed==0 and pixels.shape==(0,2)
+
+
+def test_rotation_attenuation_and_ground_off():
+    seg,X=synthetic()
+    R=seg.R.copy()
+    R[1:]=Rotation.from_rotvec([.01,.02,-.01]).as_matrix()@R[1:]
+    he=HandEyeSettings()
+    a=seg.motion(R,seg.t,X,1.,"he",he)
+    b=seg.motion(R,seg.t,X,1.,"he",he,.5)
+    np.testing.assert_allclose(b[:,:3],.5*a[:,:3])
+    np.testing.assert_allclose(b[:,3:],a[:,3:])
+    a=seg.motion(R,seg.t,X,1.,"scene",he)
+    b=seg.motion(R,seg.t,X,1.,"scene",he,.5)
+    np.testing.assert_allclose(b,.5*a,atol=1e-12)
+    for kind in ("he","scene"):
+        fit,_=solve_local_ba([seg],X,[1.],he,kind=kind,ground_weight=0.,
+                              rotation_multiplier=.5,he_block_robust=True,max_nfev=20)
+        assert fit["success"] and fit["final"]["cost"]<1e-15

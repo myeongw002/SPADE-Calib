@@ -87,16 +87,16 @@ class LocalBA:
         d=self.ground_offset-self.ground_normal@delta
         return float(ratio*d-self.lidar_offset+(X[:3,:3]@self.lidar_normal)@X[:3,3])
 
-    def motion(self,R,t,X,ratio,kind,he):
+    def motion(self,R,t,X,ratio,kind,he,rotation_multiplier=1.):
         B=R[self.centers];b=t[self.centers]
         if kind=="he":
             left=B@X[:3,:3];right=X[:3,:3]@self.Ra
             rot=Rotation.from_matrix(left.transpose(0,2,1)@right).as_rotvec()
             tr=(B-np.eye(3))@X[:3,3]+ratio*b-self.ta@X[:3,:3].T
-            return np.column_stack((rot/np.deg2rad(he.sigma_relative_rotation_deg),
+            return np.column_stack((rotation_multiplier*rot/np.deg2rad(he.sigma_relative_rotation_deg),
                                     tr/he.sigma_relative_translation_m))
         r,u=predicted_relative(B,b,X,ratio)
-        D=np.concatenate((r-self.Ra,(u-self.ta)[:,:,None]),axis=2).reshape(-1,12)
+        D=np.concatenate((rotation_multiplier*(r-self.Ra),(u-self.ta)[:,:,None]),axis=2).reshape(-1,12)
         return np.einsum("nij,nj->ni",self.factors,D)
 
 
@@ -104,7 +104,7 @@ def solve_local_ba(segments,X0,scales,he,*,kind="visual",fixed_local=None,
                    visual_weight=1.,motion_weight=1.,ground_weight=.1,
                    sigma_px=1.,sigma_scene=.15,sigma_ground=.15,
                    max_nfev=80,pose_rotation_deg=5.,pose_translation_m=2.,
-                   max_log_scale=.15):
+                   max_log_scale=.15,rotation_multiplier=1.,he_block_robust=False):
     """Common initial state for H0/H1/H2; sparse FD + LSMR, no pose priors.
 
     Per-segment mean visual and motion losses, robustified before weights.
@@ -117,6 +117,8 @@ def solve_local_ba(segments,X0,scales,he,*,kind="visual",fixed_local=None,
         raise ValueError("Invalid segment scales")
     if not np.isfinite([visual_weight,motion_weight,ground_weight,sigma_px,sigma_scene,sigma_ground,pose_rotation_deg,pose_translation_m,max_log_scale]).all() or min(visual_weight,motion_weight,sigma_px,sigma_scene,sigma_ground,pose_rotation_deg,pose_translation_m,max_log_scale)<=0 or ground_weight<0:
         raise ValueError("Invalid BA settings")
+    if not np.isfinite(rotation_multiplier) or rotation_multiplier<=0:
+        raise ValueError("Invalid rotation multiplier")
     base=6+K if joint else 0
     offsets=np.r_[base,base+np.cumsum([s.size if free else 0 for s in segments])]
     dim=int(offsets[-1]);lo=np.full(dim,-np.inf);hi=np.full(dim,np.inf)
@@ -143,13 +145,15 @@ def solve_local_ba(segments,X0,scales,he,*,kind="visual",fixed_local=None,
                 # Positive-depth barrier retained as separate residual row.
                 pieces.append(np.column_stack((_robust(v/sigma_px,"soft_l1"),np.maximum(.05-z,0)*100)).ravel()*np.sqrt(visual_weight/(K*len(v))))
             if joint:
-                r=s.motion(R,t,X,ratio[k],kind,he)
-                if kind=="he": r=_robust(r,he.robust_loss)
+                r=s.motion(R,t,X,ratio[k],kind,he,rotation_multiplier)
+                if kind=="he" and not he_block_robust:
+                    r=_robust(r,he.robust_loss)
                 else:
-                    r=r/sigma_scene
+                    if kind=="scene": r=r/sigma_scene
                     r=r*np.sqrt(2/(np.hypot(1,np.linalg.norm(r,axis=1))+1))[:,None]
                 pieces.append(r.ravel()*np.sqrt(motion_weight/(K*len(r))))
-                pieces.append(_robust(np.array([s.ground(P,X,ratio[k])/sigma_ground]),"soft_l1")*np.sqrt(ground_weight/K))
+                if ground_weight>0:
+                    pieces.append(_robust(np.array([s.ground(P,X,ratio[k])/sigma_ground]),"soft_l1")*np.sqrt(ground_weight/K))
             if report:
                 rows.append(dict(centers=len(s.frames),landmarks=len(P),observations=len(v),
                     reprojection_rmse_px=float(np.sqrt(np.mean(np.sum(v*v,axis=1)))),
@@ -177,15 +181,29 @@ def solve_local_ba(segments,X0,scales,he,*,kind="visual",fixed_local=None,
             for i in s.centers:
                 cols=np.r_[glob,s.pose_cols[i][s.pose_cols[i]>=0]+off] if free else glob
                 J[row:row+width,cols]=1;row+=width
-            cols=np.r_[glob,s.pt_cols[s.ground_ids].ravel()+off] if free else glob
-            J[row,cols]=1;row+=1
+            if ground_weight>0:
+                cols=np.r_[glob,s.pt_cols[s.ground_ids].ravel()+off] if free else glob
+                J[row,cols]=1;row+=1
     if row!=J.shape[0]: raise RuntimeError("BA sparsity row mismatch")
     sol=least_squares(evaluate,x0,jac_sparsity=J.tocsr(),tr_solver="lsmr",x_scale="jac",
                       bounds=(lo,hi),max_nfev=max_nfev,ftol=1e-7,xtol=1e-7,gtol=1e-7)
     initial,_=evaluate(x0,True);final,local=evaluate(sol.x,True)
     # No false covariance or global rank claims from a sparse local solver.
     ok=bool(sol.success and all(r["nonpositive_depth"]==0 for r in final["segments"]))
+    active=[]
+    for k,s in enumerate(segments):
+        if free:
+            for i,d in np.argwhere(s.pose_cols>=0):
+                j=offsets[k]+s.pose_cols[i,d]
+                if sol.active_mask[j]:
+                    active.append(dict(segment=k,frame=int(s.frames[i]),component=int(d),
+                                       side=int(sol.active_mask[j]),value=float(sol.x[j])))
+    global_active=[dict(component=int(j),side=int(sol.active_mask[j]),value=float(sol.x[j]))
+                   for j in range(base) if sol.active_mask[j]]
     return dict(success=ok,solver_converged=bool(sol.success),status=int(sol.status),
+                active_pose_bounds=active,active_global_bounds=global_active,
+                rotation_multiplier=float(rotation_multiplier),he_block_robust=bool(he_block_robust),
+                ground_weight=float(ground_weight),
                 message=str(sol.message),nfev=int(sol.nfev),optimality=float(sol.optimality),
                 bound_hit=bool(np.any(sol.active_mask)),variables=dim,jacobian_nnz=int(J.nnz),
                 initial=initial,final=final),local
