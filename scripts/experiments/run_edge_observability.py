@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """E0 pilot: frozen L0/C0 candidates, B4-c initialization; optional raw DA2.
-No calibration fit. No GT selection. Run with existing ZIPs or their extracted roots.
+No calibration fit. No GT selection. Read existing outputs/ directories by default; ZIPs remain optional.
 """
 import argparse, csv, hashlib, io, json, zipfile
 from pathlib import Path
@@ -10,14 +10,33 @@ import cv2
 from scipy.spatial.transform import Rotation
 
 class Archive:
-    def __init__(self,path,marker):
-        self.path=Path(path); self.z=zipfile.ZipFile(path) if self.path.is_file() else None
-        if self.z:
-            hits=[n for n in self.z.namelist() if n.endswith(marker) and (n==marker or n.endswith('/'+marker))]
-            if len(hits)!=1: raise ValueError(f'{path}: ambiguous root {hits}')
+    def __init__(self,path,marker,root_name):
+        self.path=Path(path); self.z=None; self.prefix=''
+        if self.path.is_dir():
+            self.require(marker)
+        elif self.path.is_file():
+            if not zipfile.is_zipfile(self.path):
+                raise ValueError(f'{self.path}: expected an output directory or ZIP archive')
+            self.z=zipfile.ZipFile(self.path)
+            # Accept a flat archive or an archive containing the known run root.
+            # Nested per-frame summary.json files must not be mistaken for the root.
+            hits=[n for n in self.z.namelist() if n==marker or
+                  n==f'{root_name}/{marker}' or n.endswith(f'/{root_name}/{marker}')]
+            if len(hits)!=1:
+                self.z.close()
+                raise ValueError(f'{self.path}: expected exactly one {root_name}/{marker} or root {marker}; found {hits}')
             self.prefix=hits[0][:-len(marker)]
-        else: self.prefix=''
-    def read(self,name): return self.z.read(self.prefix+name) if self.z else (self.path/name).read_bytes()
+        else:
+            raise FileNotFoundError(f'Missing input: {self.path} (expected existing output directory with {marker}, or explicit ZIP)')
+    def require(self,name):
+        if self.z:
+            if self.prefix+name not in self.z.namelist():
+                raise FileNotFoundError(f'Missing archive member: {self.path}!/{self.prefix+name}')
+        elif not (self.path/name).is_file():
+            raise FileNotFoundError(f'Missing input file: {self.path/name}')
+    def read(self,name):
+        self.require(name)
+        return self.z.read(self.prefix+name) if self.z else (self.path/name).read_bytes()
     def json(self,name): return json.loads(self.read(name))
     def npz(self,name): return dict(np.load(io.BytesIO(self.read(name)),allow_pickle=False))
     def image(self,name):
@@ -126,22 +145,30 @@ def prior(ground,motion,X):
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
-    for name in ('m0','c0','ground','motion','out'):p.add_argument('--'+name,type=Path,required=True)
+    defaults={'m0':'outputs/lines07_M0_ghost','c0':'outputs/lines07_C0',
+              'ground':'outputs/ground07_B4c','motion':'outputs/trajectory_oracle07'}
+    for name,path in defaults.items():
+        p.add_argument('--'+name,type=Path,default=Path(path),help=f'Existing output directory or ZIP (default: {path})')
+    p.add_argument('--out',type=Path,required=True,help='Fresh output directory')
     p.add_argument('--budget',type=int,default=10);p.add_argument('--depth-dir',type=Path);p.add_argument('--da2-repo',type=Path);p.add_argument('--checkpoint',type=Path);p.add_argument('--encoder',default='vitl');p.add_argument('--device',default='auto');p.add_argument('--image-dir',type=Path);a=p.parse_args()
     if a.budget<1 or (a.depth_dir and a.checkpoint) or (a.checkpoint and (not a.da2_repo or not a.image_dir)):p.error('invalid depth/budget arguments')
     if a.out.exists() and any(a.out.iterdir()):raise FileExistsError(a.out)
-    a.out.mkdir(parents=True,exist_ok=True)
-    m0=Archive(a.m0,'manifest.json');c0=Archive(a.c0,'summary.json') if a.c0.is_dir() else None
-    if c0 is None:
-        # C0 has nested summary files; use the exact known top-level member.
-        c0=Archive(a.c0,'outputs/lines07_C0/summary.json');c0.prefix+='outputs/lines07_C0/'
-    ground=Archive(a.ground,'ground07_B4c/summary.json') if a.ground.is_file() else Archive(a.ground,'summary.json')
-    if a.ground.is_file():ground.prefix+='ground07_B4c/'
-    motion=Archive(a.motion,'trajectory_oracle07/motion_pairs.npz') if a.motion.is_file() else Archive(a.motion,'motion_pairs.npz')
-    if a.motion.is_file():motion.prefix+='trajectory_oracle07/'
+    m0=Archive(a.m0,'manifest.json','lines07_M0_ghost')
+    c0=Archive(a.c0,'summary.json','lines07_C0')
+    ground=Archive(a.ground,'summary.json','ground07_B4c')
+    motion=Archive(a.motion,'motion_pairs.npz','trajectory_oracle07')
     manifest=m0.json('manifest.json');ann=m0.json('annotations.json');cfg=c0.json('summary.json');g=ground.json('summary.json');m=motion.npz('motion_pairs.npz')
     assert sha(m0.read('manifest.json'))==cfg['manifest_sha256']==ann['manifest_sha256'] and sha(m0.read('annotations.json'))==cfg['annotations_sha256']
     K=np.array(manifest['K']);X=np.array(g['experiments']['B4c_w0.1']['final']['T_camera_lidar']); H,cost=prior(g,m,X)
+    # Check every required frame input before creating any result files.
+    for f in sorted(map(int,cfg['frames'])):
+        for name in ('elsed_segments.npz','comparison.png','global_matches.json'):
+            c0.require(f'frame_{f:06d}/{name}')
+        if a.image_dir and not (a.image_dir/f'{f:06d}.png').is_file():
+            raise FileNotFoundError(a.image_dir/f'{f:06d}.png')
+        if a.depth_dir and not (a.depth_dir/f'{f:06d}.npy').is_file():
+            raise FileNotFoundError(a.depth_dir/f'{f:06d}.npy')
+    a.out.mkdir(parents=True,exist_ok=True)
     rows=[];reviews=[];frames={};sums=defaultdict(list);post_sums=defaultdict(list);manual=[];Dmode=bool(a.depth_dir or a.checkpoint)
     for f in sorted(map(int,cfg['frames'])):
         path=f'frame_{f:06d}/';arr=c0.npz(path+'elsed_segments.npz');s0=arr['segments'].reshape(-1,2,2);length0=np.linalg.norm(s0[:,1]-s0[:,0],axis=1);ids=np.flatnonzero(length0>=40);s=s0[ids];length=length0[ids];l,n=line_normals(s,K);M=n[:,[0,2],None]*n[:,None,[0,2]]

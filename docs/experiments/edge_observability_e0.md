@@ -4,12 +4,18 @@ Actual archived run: KITTI07, eight C0 anchors, 991 eligible ELSED lines (>=40 p
 
 ## Run
 
-Use the four existing ZIPs (or corresponding extracted directory roots). Install the existing research dependencies (NumPy, SciPy, OpenCV). Run from repository root.
+Use the existing output directories directly; no ZIP creation or extraction is required. Install the existing research dependencies (NumPy, SciPy, OpenCV). Run from repository root.
+
+Default inputs:
+- `outputs/lines07_M0_ghost`: manifest.json, annotations.json
+- `outputs/lines07_C0`: summary.json and each frame's elsed_segments.npz, comparison.png, global_matches.json
+- `outputs/ground07_B4c`: summary.json
+- `outputs/trajectory_oracle07`: motion_pairs.npz
+
+Override any default with --m0, --c0, --ground or --motion if your run folders differ; explicit ZIPs remain supported. Missing input files are reported before result generation. If an output folder itself was deleted, restore or regenerate that upstream run first.
 
 ```bash
 python scripts/experiments/run_edge_observability.py \
-  --m0 line_support.zip --c0 lines07_C0.zip \
-  --ground ground_b4c.zip --motion trajectory_oracle.zip \
   --out outputs/edge07_E0
 ```
 
@@ -18,8 +24,6 @@ For DA2 use the repository's existing spade_calib.camera.depth_inference.infer_d
 ```bash
 KITTI=/media/myungw00/256GB_SSD/kitti
 python scripts/experiments/run_edge_observability.py \
-  --m0 line_support.zip --c0 lines07_C0.zip \
-  --ground ground_b4c.zip --motion trajectory_oracle.zip \
   --image-dir "$KITTI/data_odometry_color/sequences/07/image_2" \
   --da2-repo /path/to/Depth-Anything-V2 \
   --checkpoint /path/to/depth_anything_v2_vitl.pth \
@@ -37,6 +41,10 @@ Alternatively `--depth-dir` points to original-resolution raw float .npy predict
 | normal | 80 | 0.3053 | 1 |
 
 Postmatch (16 selected; lambda=.1): baseline min eigenvalue .1334; length .1451; random .2023; normal .1539; full Jacobian .2431. These are conditional on unverified correspondence. Manual reference perpendicular distances at B4-c: frames 189/389/659 = 39.23/65.55/26.85 px. Existing distance gate 20px: capture range remains unresolved.
+
+## Input compatibility validation
+
+Directory-default and explicit ZIP runs on the original KITTI07 E0 inputs produced byte-identical summary.json, features.csv and review.csv in the local no-depth test. DA2 inference was not executed in this validation. Algorithm, thresholds and selection logic are unchanged.
 
 ## Outputs
 
