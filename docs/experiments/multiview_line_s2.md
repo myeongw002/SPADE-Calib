@@ -32,3 +32,11 @@ python scripts/experiments/run_local_visual_ba.py \
 ```
 Review CSV decisions accept/reject/skip. Ambiguous candidates require
 chosen_index. Do not accept uncertain matches. No GT for review.
+
+## Matching on exact BA support
+
+The original offset pilot may contain no accepted views in the BA archive.
+Use prepare --reference-ba to enumerate exact H2 frame IDs per anchor and
+run ELSED on missing visible views. Existing review decisions must not be
+blindly copied. New matching output and optimization output directories
+must be empty; no change to the H2 support or train/test labels.

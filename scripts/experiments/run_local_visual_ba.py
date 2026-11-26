@@ -480,7 +480,15 @@ def main(argv=None):
                 if not np.allclose(lk,kp,rtol=1e-8,atol=1e-8) or not np.allclose(review["K"],lk,atol=1e-9):raise ValueError("S2 camera K mismatch")
                 tracks,skipped=prepare_tracks(segments,ad["records"],review["records"])
                 train=[t for t in tracks if t["split"]=="train"];test=[t for t in tracks if t["split"]=="test"]
-                if not train:raise ValueError("No confirmed train tracks with a non-anchor view in the same archived BA support")
+                if not train:
+                    raise ValueError(f"No confirmed train tracks with a non-anchor view in the same archived BA support; skipped={skipped}; surviving_tracks={[(t['id'],t['split'],[v['frame'] for v in t['views']]) for t in tracks]}. Reprepare matching with --reference-ba.")
+                if review.get("ba_support"):
+                    bp=review["ba_support"]
+                    if bp["arm"]!=name or bp["summary_sha256"]!=digest(ref/"summary.json"):
+                        raise ValueError("Reviewed BA support mismatch")
+                    for k in range(len(segments)):
+                        if bp["segment_sha256"][str(k)]!=digest(ref/name/f"segment_{k:02d}.npz"):
+                            raise ValueError("Reviewed BA segment archive changed")
                 states=[seg.state(v) for seg,v in zip(segments,x[3:])];start=np.concatenate(x[:3])
                 summary["s2"]=dict(review_sha256=digest(args.s2_reviewed),manifest_sha256=digest(mp),annotations_sha256=digest(ap),reference_arm=name,tracks=[dict(id=t["id"],segment=t["segment"],split=t["split"],frames=[v["frame"] for v in t["views"]]) for t in tracks],skipped=skipped,warning="Manual M0 anchor + human-reviewed nonanchor ELSED; fixed visual state, no automatic tracking. Same observations for GLIM/camera. Anchor-only has equal physical-track mass. Not a held-out test unless entire tracks are test.")
                 result["reference_only"]=True;result["trajectory_gt"]=trajectory_metrics(states,est/scales)
