@@ -117,6 +117,8 @@ def main(argv=None):
     p.add_argument("--extended-ablation",action="store_true",help="Also run ground-off and rotation attenuation controls")
     p.add_argument("--ij",action="store_true",help="Run I observability and J virtual moment experiments instead of H")
     p.add_argument("--s1",action="store_true",help="S1: diagnose scale coupling at archived H1/H2 states without refitting")
+    p.add_argument("--s2-reviewed",type=Path,help="S2: finalized human-reviewed multiview matches JSON")
+    p.add_argument("--s2-m0",type=Path,help="Original M0 directory for S2")
     p.add_argument("--s1r",action="store_true",help="S1-R: fixed-scale oracle and matched warm-start controls")
     p.add_argument("--scale-bias-pct",type=float,default=1.,help="S1-R: common multiplicative oracle-scale perturbation in percent")
     p.add_argument("--line-data",type=Path,help="M1 mode: prepared M0 manifest and annotations")
@@ -155,7 +157,10 @@ def main(argv=None):
     if (args.window<1 or args.window%2==0 or args.max_tracks_per_view<12 or args.ground_cap<6
             or not 0<args.min_parallax_deg<90 or args.seed<0 or args.max_nfev<10):
         raise ValueError("Invalid BA sampling/iteration settings")
-    if (args.s1 or args.s1r) and (not args.reference_ba or args.ij or args.line_data or args.ablation_windows
+    if bool(args.s2_reviewed)!=bool(args.s2_m0):raise ValueError("S2 requires reviewed JSON and M0 directory")
+    if args.s2_reviewed and (args.s1 or args.s1r or not np.isfinite(args.line_weights).all() or min(args.line_weights)<=0 or len(set(args.line_weights))!=len(args.line_weights) or not np.isfinite(args.line_sigma_px) or args.line_sigma_px<=0):
+        raise ValueError("Invalid S2 flags/weights")
+    if (args.s1 or args.s1r or args.s2_reviewed) and (not args.reference_ba or args.ij or args.line_data or args.ablation_windows
                      or args.extended_ablation or args.image_dir or args.window!=5 or args.scene_kind!="point"
                      or args.ground_weight<=0 or args.information_maxiter<1):
         raise ValueError("S1 requires original --reference-ba H, W5 point, positive ground; no other modes")
@@ -410,7 +415,7 @@ def main(argv=None):
         LOG.info("%s: success=%s, nfev=%d, %.1fs",name,result["success"],result["nfev"],result["elapsed_s"])
         return local
     zeros=[np.zeros(s.size) for s in segments]
-    if args.s1 or args.s1r:
+    if args.s1 or args.s1r or args.s2_reviewed:
         ref=args.reference_ba
         prior=json.loads((ref/"summary.json").read_text())
         if (not np.allclose(prior["baseline"]["T_camera_lidar"],X,atol=1e-9)
@@ -423,6 +428,7 @@ def main(argv=None):
                 raise ValueError(f"S1 reference setting mismatch: {key}")
         # Original H archive (or H ablation W5 with same settings).
         arms=[("H1_joint_HE","he"),("H2_joint_scene" if "H2_joint_scene" in prior["experiments"] else "H2_joint_scene_w5","scene")]
+        if args.s2_reviewed:arms=arms[1:]
         for name,kind in arms:
             r=prior["experiments"][name]
             if not r["success"] or r.get("he_block_robust",False) or r.get("rotation_multiplier",1.)!=1.:
@@ -451,7 +457,7 @@ def main(argv=None):
                     x.append(local)
             result,_=solve_local_ba(segments,X,scales,he,kind=kind,**opts,
                       scale_diagnostic_state=np.concatenate(x),information_maxiter=args.information_maxiter,
-                      archive_cost_only=args.s1r)
+                      archive_cost_only=bool(args.s1r or args.s2_reviewed))
             # Exact objective reproduction gate: do not interpret information
             # if the current code/support differs from archived H.
             for state in ("initial","final"):
@@ -461,6 +467,40 @@ def main(argv=None):
             result["reference_cost_verified"]=True
             result["source_active_bounds_reported"]=bool(r.get("bound_hit"))
             if gt is not None: result["gt_evaluation"]=evaluate_camera_lidar(Y,gt)
+            if args.s2_reviewed:
+                from spade_calib.calibration.multiview_line_fit import prepare_tracks,solve_fixed,report_lines
+                from spade_calib.evaluation.kitti import parse_kitti_odom_calib
+                mp=args.s2_m0/"manifest.json";ap=args.s2_m0/"annotations.json"
+                md=json.loads(mp.read_text());ad=json.loads(ap.read_text());review=json.loads(args.s2_reviewed.read_text())
+                digest=lambda p:hashlib.sha256(Path(p).read_bytes()).hexdigest()
+                if (ad["manifest_sha256"]!=digest(mp) or review["manifest_sha256"]!=digest(mp) or review["annotations_sha256"]!=digest(ap) or review["glim_sha256"]!=digest(args.glim or cfg["glim"]) or Path(md["run"]).name!=args.run.name or md["camera_index"]!=int(cfg["camera_index"]) or md["initial_arm"]!=name or not np.allclose(md["T_camera_lidar"],Y,atol=1e-9) or not np.allclose(review["T_camera_lidar"],Y,atol=1e-9)):
+                    raise ValueError("S2 M0/review/H provenance mismatch")
+                lk=np.asarray(md["K"],float)
+                kp=parse_kitti_odom_calib(Path(args.sequence or cfg["sequence"])/"calib.txt",require_tr=False)[f"P{int(cfg['camera_index'])}"][:,:3]
+                if not np.allclose(lk,kp,rtol=1e-8,atol=1e-8) or not np.allclose(review["K"],lk,atol=1e-9):raise ValueError("S2 camera K mismatch")
+                tracks,skipped=prepare_tracks(segments,ad["records"],review["records"])
+                train=[t for t in tracks if t["split"]=="train"];test=[t for t in tracks if t["split"]=="test"]
+                if not train:raise ValueError("No confirmed train tracks with a non-anchor view in the same archived BA support")
+                states=[seg.state(v) for seg,v in zip(segments,x[3:])];start=np.concatenate(x[:3])
+                summary["s2"]=dict(review_sha256=digest(args.s2_reviewed),manifest_sha256=digest(mp),annotations_sha256=digest(ap),reference_arm=name,tracks=[dict(id=t["id"],segment=t["segment"],split=t["split"],frames=[v["frame"] for v in t["views"]]) for t in tracks],skipped=skipped,warning="Manual M0 anchor + human-reviewed nonanchor ELSED; fixed visual state, no automatic tracking. Same observations for GLIM/camera. Anchor-only has equal physical-track mass. Not a held-out test unless entire tracks are test.")
+                result["reference_only"]=True;result["trajectory_gt"]=trajectory_metrics(states,est/scales)
+                result["line_train"]=report_lines(segments,states,train,Y,est/scales,lk)
+                result["line_test"]=report_lines(segments,states,test,Y,est/scales,lk)
+                summary["experiments"][name+"_archive"]=result;write_json(args.out/"summary.json",summary)
+                arms2=[("none",0.,False)]+[(mode,w,False) for w in args.line_weights for mode in ("anchor","glim","camera")]+[("camera",w,True) for w in args.line_weights]
+                for mode,w,fixed in arms2:
+                    label=f"S2_{mode}_w{w:g}"+("_fixed_scale" if fixed else "")
+                    LOG.info("Optimizing %s",label);clock=perf_counter()
+                    res=solve_fixed(segments,states,train,X,scales,he,start,lk,kind=kind,mode=mode,weight=w,sigma=args.line_sigma_px,motion_weight=args.motion_weight,ground_weight=args.ground_weight,sigma_scene=args.sigma_scene,sigma_ground=args.sigma_ground,max_log_scale=args.max_log_scale,max_nfev=args.max_nfev,fixed_scale=fixed)
+                    Ynew=np.asarray(res["final"]["T_camera_lidar"]);snew=np.asarray(res["final"]["scales"])
+                    res["trajectory_gt"]=trajectory_metrics(states,snew/scales)
+                    res["line_test"]=report_lines(segments,states,test,Ynew,snew/scales,lk)
+                    if gt is not None:res["gt_evaluation"]=evaluate_camera_lidar(Ynew,gt)
+                    res["elapsed_s"]=perf_counter()-clock
+                    res["scale_change_relative_to_H"]=(snew/est-1).tolist()
+                    summary["experiments"][label]=res;write_json(args.out/"summary.json",summary)
+                    LOG.info("%s: success=%s, nfev=%d",label,res["success"],res["nfev"])
+                return 0
             if args.s1r:
                 # Both references are in the ORIGINAL gauge and units:
                 # the fixed baseline coordinate must match GT for gauge oracle;
