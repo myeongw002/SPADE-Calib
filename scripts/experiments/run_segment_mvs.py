@@ -44,7 +44,8 @@ def main(argv=None):
     p.add_argument("--segment-id",type=int,nargs="+")
     p.add_argument("--contains-frame",type=int,nargs="+")
     p.add_argument("--image-stride",type=int,default=1)
-    p.add_argument("--backend",choices=["openmvs","colmap","both"],default="openmvs")
+    p.add_argument("--backend",choices=["pycolmap","openmvs","colmap","both"],default="openmvs")
+    p.add_argument("--gpu-index",default="0",help="PyCOLMAP PatchMatch GPU index (comma-separated for multiple GPUs)")
     p.add_argument("--colmap",default="colmap")
     p.add_argument("--interface",default="InterfaceCOLMAP")
     p.add_argument("--densify",default="DensifyPointCloud")
@@ -84,7 +85,18 @@ def main(argv=None):
         segments.append((k,anchor,scale,selected,len(names)))
     if not segments or (a.segment_id and not set(a.segment_id)<=set(x[0] for x in segments)):
         raise ValueError("No selected segment or unknown segment ID")
-    colmap=executable(a.colmap)
+    py=None
+    if a.backend=="pycolmap":
+        try:import pycolmap as py
+        except ImportError as exc:raise SystemExit("Install CUDA-enabled pycolmap (pycolmap-cuda12==3.13.0)") from exc
+        if not a.prepare_only:
+            required=("undistort_images","patch_match_stereo","stereo_fusion","PatchMatchOptions","StereoFusionOptions","UndistortCameraOptions")
+            if any(not hasattr(py,k) for k in required) or getattr(py,"has_cuda",True) is False:
+                raise SystemExit("PyCOLMAP lacks CUDA MVS support; install CUDA-enabled build")
+        if not str(py.__version__).startswith("3.13."):
+            raise SystemExit(f"PyCOLMAP backend validated against 3.13 API docs; install 3.13.0 (found {py.__version__})")
+    else:
+        colmap=executable(a.colmap)
     if not a.prepare_only:
         try:import open3d as o3d
         except ImportError as exc:raise SystemExit("Install open3d in this venv for PLY conversion") from exc
@@ -98,10 +110,14 @@ def main(argv=None):
                  settings=dict(backend=a.backend,image_stride=a.image_stride,max_image_size=a.max_image_size,
                                resolution_level=a.resolution_level,number_views=a.number_views,
                                fusion_views=a.fusion_views,cuda_device=a.cuda_device,threads=a.threads,
-                               prepare_only=a.prepare_only),commands=[],segments={})
+                               prepare_only=a.prepare_only,gpu_index=a.gpu_index,
+                               pycolmap_version=py.__version__ if py else None),commands=[],segments={})
     full=a.out/"global_text";full.mkdir()
-    run([colmap,"model_converter","--input_path",source,"--output_path",full,"--output_type","TXT"],
-        a.out,a.out/"model_converter.log",summary["commands"])
+    if py:
+        py.Reconstruction(str(source)).write_text(str(full))
+    else:
+        run([colmap,"model_converter","--input_path",source,"--output_path",full,"--output_type","TXT"],
+            a.out,a.out/"model_converter.log",summary["commands"])
     model=read_text_model(full);write(a.out/"summary.json",summary)
     failed=False
     for k,anchor,scale,names,total in segments:
@@ -116,10 +132,19 @@ def main(argv=None):
             info["sparse"]=subset_text_model(model,names,folder/"sparse")
             if not a.prepare_only:
                 dense=folder/"dense";dense.mkdir()
-                run([colmap,"image_undistorter","--image_path",a.image_dir,
-                     "--input_path",folder/"sparse","--output_path",dense,
-                     "--output_type","COLMAP","--max_image_size",a.max_image_size],
-                    folder,folder/"undistort.log",info["commands"])
+                if py:
+                    opts=py.UndistortCameraOptions(max_image_size=a.max_image_size)
+                    # pycolmap 3.13 selects source views during undistortion.
+                    info["pycolmap_undistort"]=dict(max_image_size=a.max_image_size,
+                         num_patch_match_src_images=a.number_views)
+                    py.undistort_images(str(dense),str(folder/"sparse"),str(a.image_dir),
+                         output_type="COLMAP",num_patch_match_src_images=a.number_views,
+                         undistort_options=opts)
+                else:
+                    run([colmap,"image_undistorter","--image_path",a.image_dir,
+                         "--input_path",folder/"sparse","--output_path",dense,
+                         "--output_type","COLMAP","--max_image_size",a.max_image_size],
+                        folder,folder/"undistort.log",info["commands"])
                 # Undistortion may change intrinsics/image dimensions; poses must not change.
                 und=load_registered_images(dense/"sparse")
                 if set(und)!=set(names):raise ValueError("Undistorted image membership mismatch")
@@ -141,6 +166,24 @@ def main(argv=None):
                                  "--number-views-fuse",a.fusion_views,"--max-threads",a.threads]
                             if a.cuda_device is not None:cmd+=["--cuda-device",a.cuda_device]
                             run(cmd,work,work/"densify.log",info["commands"])
+                        elif backend=="pycolmap":
+                            cloud=work/"fused.ply"
+                            patch=py.PatchMatchOptions(max_image_size=a.max_image_size,
+                                    gpu_index=a.gpu_index,geom_consistency=True)
+                            fusion=py.StereoFusionOptions(max_image_size=a.max_image_size,
+                                    min_num_pixels=a.fusion_views,num_threads=a.threads or -1,
+                                    use_cache=True,cache_size=8.)
+                            result["patch_match_options"]=patch.todict()
+                            # bounding_box contains numpy arrays; record relevant fusion settings explicitly.
+                            result["fusion_options"]=dict(max_image_size=a.max_image_size,
+                                     min_num_pixels=a.fusion_views,num_threads=a.threads or -1,
+                                     use_cache=True,cache_size=8.)
+                            start=time.monotonic()
+                            py.patch_match_stereo(str(dense),options=patch)
+                            result["patch_match_seconds"]=time.monotonic()-start
+                            start=time.monotonic()
+                            py.stereo_fusion(str(cloud),str(dense),input_type="geometric",options=fusion)
+                            result["fusion_seconds"]=time.monotonic()-start
                         else:
                             cloud=work/"fused.ply"
                             run([colmap,"patch_match_stereo","--workspace_path",dense,
