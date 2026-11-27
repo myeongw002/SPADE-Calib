@@ -34,16 +34,18 @@ rotate only, same anchor as prior segment reconstruction. No separate
 segment cloud fusion. Check dense-vs-sparse position and scale before
 plane fitting. Point count is not plane accuracy; no GT comparison yet.
 
-## PyCOLMAP backend (3.13.0 API)
+## PyCOLMAP backend (3.13 / 4.2 API)
 
-Linux CUDA wheel: `python -m pip uninstall pycolmap pycolmap-cuda12` then
-`python -m pip install pycolmap-cuda12==3.13.0` in the active venv (both packages
-provide pycolmap; avoid co-installing). Verify import, version and CUDA support.
+Use the existing CUDA-enabled PyCOLMAP environment; no downgrade needed for
+4.2.1. Verify import, version and CUDA support. Do not co-install wheels that
+provide the same pycolmap module.
 Use --backend pycolmap --gpu-index 0. No external colmap or OpenMVS binary needed.
 Reconstruction.write_text, undistort_images, patch_match_stereo and stereo_fusion
 are called in-process. Same archived segment membership, pose checks and metric
 PLY export. Default 8 source views, geometric consistency, min_num_pixels=3
 (fused pixel count, not a guaranteed distinct-view count), fusion LRU cache 8 GB.
-The 3.13.0 API is documented; CUDA hardware/runtime and integration not tested.
+The 3.13.0 and 4.2.1 tagged MVS bindings were inspected. 4.2 uses explicit
+output_type="ply" for stereo_fusion (default bin), while 3.13 has no such
+argument. CUDA hardware/runtime and integration not tested.
 Native logs go to terminal; redirect stdout/stderr to a log if desired.
 See https://colmap.github.io/legacy/3.13/pycolmap/pycolmap.html .

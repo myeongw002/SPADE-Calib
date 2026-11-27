@@ -88,13 +88,13 @@ def main(argv=None):
     py=None
     if a.backend=="pycolmap":
         try:import pycolmap as py
-        except ImportError as exc:raise SystemExit("Install CUDA-enabled pycolmap (pycolmap-cuda12==3.13.0)") from exc
+        except ImportError as exc:raise SystemExit("Activate your existing CUDA-enabled pycolmap environment") from exc
         if not a.prepare_only:
             required=("undistort_images","patch_match_stereo","stereo_fusion","PatchMatchOptions","StereoFusionOptions","UndistortCameraOptions")
             if any(not hasattr(py,k) for k in required) or getattr(py,"has_cuda",True) is False:
                 raise SystemExit("PyCOLMAP lacks CUDA MVS support; install CUDA-enabled build")
-        if not str(py.__version__).startswith("3.13."):
-            raise SystemExit(f"PyCOLMAP backend validated against 3.13 API docs; install 3.13.0 (found {py.__version__})")
+        if not str(py.__version__).startswith(("3.13.", "4.2.")):
+            raise SystemExit(f"PyCOLMAP MVS API checked for 3.13 and 4.2; found {py.__version__}. Check API compatibility before running.")
     else:
         colmap=executable(a.colmap)
     if not a.prepare_only:
@@ -134,7 +134,7 @@ def main(argv=None):
                 dense=folder/"dense";dense.mkdir()
                 if py:
                     opts=py.UndistortCameraOptions(max_image_size=a.max_image_size)
-                    # pycolmap 3.13 selects source views during undistortion.
+                    # Select source views during undistortion.
                     info["pycolmap_undistort"]=dict(max_image_size=a.max_image_size,
                          num_patch_match_src_images=a.number_views)
                     py.undistort_images(str(dense),str(folder/"sparse"),str(a.image_dir),
@@ -182,7 +182,10 @@ def main(argv=None):
                             py.patch_match_stereo(str(dense),options=patch)
                             result["patch_match_seconds"]=time.monotonic()-start
                             start=time.monotonic()
-                            py.stereo_fusion(str(cloud),str(dense),input_type="geometric",options=fusion)
+                            # 4.2 defaults to a binary reconstruction directory, not PLY.
+                            # 3.13 writes PLY directly and has no output_type parameter.
+                            output_kw = {"output_type": "ply"} if str(py.__version__).startswith("4.2.") else {}
+                            py.stereo_fusion(str(cloud),str(dense),input_type="geometric",options=fusion,**output_kw)
                             result["fusion_seconds"]=time.monotonic()-start
                         else:
                             cloud=work/"fused.ply"
