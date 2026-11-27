@@ -65,22 +65,38 @@ def fit_segmented_motion_pairs(
     *, pair_mask: NDArray[np.bool_] | None = None,
     initial_scales: NDArray | None = None,
     fix_rotation: bool = False, fix_translation: bool = False,
+    freeze_pair_mask: bool = False, fix_scales: bool = False,
 ) -> MultiScaleResult:
     """Fit 6+K unknowns (or fixed R/t ablation) with existing motion residual.
 
     Gate using the initial X, then keep assignments fixed during optimization.
-    A supplied pair_mask is intersected with the gate and boundary mask.
+    A supplied pair_mask is intersected with the gate and boundary mask by default.
+    Diagnostic freeze_pair_mask bypasses data-dependent gating; requires
+    explicit scales and a valid within-segment mask. fix_scales holds these fixed.
     Two starts (segment OLS and pooled OLS) are compared unless explicit scales
     are supplied. The scale gates are not statistical confidence intervals.
     """
     X0 = validate_extrinsic(initial_X)
-    evidence = estimate_pair_scales(pairs, X0, segmentation_settings)
-    mask = shared_pair_mask(pairs, evidence, partition)
-    if pair_mask is not None:
-        provided = np.asarray(pair_mask)
-        if provided.shape != mask.shape or provided.dtype != np.bool_:
+    if freeze_pair_mask:
+        if pair_mask is None or initial_scales is None:
+            raise ValueError("Frozen pairs require explicit mask and initial scales")
+        mask = np.asarray(pair_mask)
+        if mask.shape != (pairs.count,) or mask.dtype != np.bool_:
             raise ValueError("pair_mask must be a boolean array aligned to MotionPairs")
-        mask &= provided
+        if np.any(mask & (partition.groups(pairs)<0)):
+            raise ValueError("Frozen pairs must stay within segments")
+        mask = mask.copy()
+        evidence = None
+    else:
+        evidence = estimate_pair_scales(pairs, X0, segmentation_settings)
+        mask = shared_pair_mask(pairs, evidence, partition)
+        if pair_mask is not None:
+            provided = np.asarray(pair_mask)
+            if provided.shape != mask.shape or provided.dtype != np.bool_:
+                raise ValueError("pair_mask must be a boolean array aligned to MotionPairs")
+            mask &= provided
+    if fix_scales and initial_scales is None:
+        raise ValueError("Fixed scales require explicit values")
     K = partition.count
     groups = partition.groups(pairs)
     sub = [_subset(pairs, mask & (groups == k)) for k in range(K)]
@@ -93,28 +109,32 @@ def fit_segmented_motion_pairs(
         if not np.isfinite(s) or s <= 0:
             raise ValueError("Nonpositive initial OLS scale")
         return s
-    local = np.array([ols(mask & (groups == k)) for k in range(K)])
-    starts = [local, np.full(K, ols(mask))]
-    if initial_scales is not None:
+    if initial_scales is None:
+        local = np.array([ols(mask & (groups == k)) for k in range(K)])
+        starts = [local, np.full(K, ols(mask))]
+    else:
         supplied = np.asarray(initial_scales, dtype=float)
         if supplied.shape != (K,) or not np.isfinite(supplied).all() or np.any(supplied <= 0):
             raise ValueError("initial_scales must contain K finite positive scales")
         starts = [supplied]
 
     nr, nt = (0 if fix_rotation else 3), (0 if fix_translation else 3)
-    dim = nr + nt + K
+    ns = 0 if fix_scales else K
+    dim = nr + nt + ns
+    if dim == 0:
+        raise ValueError("At least one free parameter required")
     R0, t0 = X0[:3, :3], X0[:3, 3]
     sig_r = np.deg2rad(settings.sigma_relative_rotation_deg)
     sig_t = settings.sigma_relative_translation_m
     # Optimize absolute log-scales with very broad numerical safety bounds,
     # not the evidence gates. Rotation/translation keep the existing chart.
-    lower = np.r_[np.full(nr + nt, -np.inf), np.full(K, -30.)]
-    upper = np.r_[np.full(nr + nt, np.inf), np.full(K, 30.)]
+    lower = np.r_[np.full(nr + nt, -np.inf), np.full(ns, -30.)]
+    upper = np.r_[np.full(nr + nt, np.inf), np.full(ns, 30.)]
 
     def unpack(x):
         R = Rotation.from_rotvec(x[:3]).as_matrix() @ R0 if nr else R0
         t = t0 + x[nr:nr + 3] if nt else t0
-        return R, t, np.exp(x[nr + nt:])
+        return R, t, supplied if fix_scales else np.exp(x[nr + nt:])
 
     def raw(x):
         R, t, s = unpack(x)
@@ -131,7 +151,7 @@ def fit_segmented_motion_pairs(
         logs = np.log(scales)
         if np.any(logs <= -30) or np.any(logs >= 30):
             raise ValueError("Initial scale outside numerical safety bounds")
-        x0 = np.r_[np.zeros(nr + nt), logs]
+        x0 = np.r_[np.zeros(nr + nt), logs if ns else np.empty(0)]
         solves.append(least_squares(objective, x0, bounds=(lower, upper),
                                    method="trf", loss=settings.robust_loss, x_scale="jac",
                                    max_nfev=settings.max_nfev,
@@ -147,7 +167,7 @@ def fit_segmented_motion_pairs(
     # Unrobustified, scaled local Jacobian for rank diagnostics only.
     units = np.r_[np.full(nr, np.deg2rad(settings.reference_rotation_deg)),
                   np.full(nt, settings.reference_translation_m),
-                  np.full(K, settings.reference_log_scale)]
+                  np.full(ns, settings.reference_log_scale)]
     J = np.empty((r.size, dim))
     for i, unit in enumerate(units):
         dx = np.zeros(dim)
@@ -163,6 +183,7 @@ def fit_segmented_motion_pairs(
                    "normalized_jacobian_singular_values": sv.tolist(),
                    "full_rank": rank == dim, "scale_at_numerical_bound": bool(np.any(sol.active_mask[nr+nt:])),
                    "rank_is_not_physical_covariance": True, "relative_motion_pairs_may_be_correlated": True,
-                   "fix_rotation": fix_rotation, "fix_translation": fix_translation}
+                   "fix_rotation": fix_rotation, "fix_translation": fix_translation,
+                   "freeze_pair_mask": freeze_pair_mask, "fix_scales": fix_scales}
     return MultiScaleResult(X, scales, partition, mask, counts, diagnostics,
                             settings, segmentation_settings)
